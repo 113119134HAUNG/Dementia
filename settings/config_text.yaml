@@ -61,13 +61,12 @@ text:
 
   # Other Chinese datasets (already in JSONL)
   predictive_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
-  taukadial_jsonl: "/content/TAUKADIAL.jsonl"
 
   # Directory to store merged & preprocessed JSONL files
   output_dir: "/content/chinese_combined"
 
   # Name of merged JSONL combining all Chinese datasets
-  combined_name: "Chinese_NCMMSC_iFlyTek_Taukdial.jsonl"
+  combined_name: "Chinese_NCMMSC_iFlyTek.jsonl"
 
   # Filenames for final train/test splits (written into output_dir)
   train_jsonl: "train_chinese.jsonl"
