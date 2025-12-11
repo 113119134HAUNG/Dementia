@@ -1,14 +1,28 @@
-# config_utils.py
+"""
+config_utils.py
+Utility functions for loading and accessing configuration in config_text.yaml.
+
+This module keeps all path / model / dataset settings in a single YAML
+file, so that experimental code can remain clean and reproducible.
+"""
+
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 import yaml
 
+# Default location of the text/ASR configuration file
 DEFAULT_CONFIG_PATH = Path("config_text.yaml")
 
-# 讀取設定檔，回傳dict，包含 "asr" 與 "text" 兩個 section。
 def load_text_config(path: Optional[str] = None) -> Dict[str, Any]:
+    """Load the full configuration dictionary from a YAML file.
 
+    Args:
+        path: Optional path to the YAML file. If None, uses DEFAULT_CONFIG_PATH.
+
+    Returns:
+        A dictionary with (at least) the keys "asr" and "text".
+    """
     if path is None:
         path = DEFAULT_CONFIG_PATH
     else:
@@ -22,20 +36,26 @@ def load_text_config(path: Optional[str] = None) -> Dict[str, Any]:
 
     return cfg
 
-# 取得 asr 區塊設定。
-def get_asr_config(cfg: Optional[Dict[str, Any]] = None,
-                   path: Optional[str] = None) -> Dict[str, Any]:
+def get_asr_config(
+    cfg: Optional[Dict[str, Any]] = None,
+    path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the 'asr' section of the config.
 
+    You can either pass an already-loaded ``cfg`` or let this function
+    load from ``path`` / DEFAULT_CONFIG_PATH.
+    """
     if cfg is None:
         cfg = load_text_config(path)
     if "asr" not in cfg:
         raise KeyError("Config 檔缺少 'asr' 區塊。")
     return cfg["asr"]
 
-# 取得 text 區塊設定
-def get_text_config(cfg: Optional[Dict[str, Any]] = None,
-                    path: Optional[str] = None) -> Dict[str, Any]:
-
+def get_text_config(
+    cfg: Optional[Dict[str, Any]] = None,
+    path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the 'text' section of the config."""
     if cfg is None:
         cfg = load_text_config(path)
     if "text" not in cfg:
