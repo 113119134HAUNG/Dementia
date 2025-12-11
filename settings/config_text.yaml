@@ -1,9 +1,8 @@
-"""
-config_text.yaml
-Central configuration for:
-- ASR on NCMMSC audio
-- Text preprocessing & dataset merging for Chinese corpora
-"""
+# config_text.yaml
+# Central configuration for:
+# - ASR on NCMMSC audio
+# - Text preprocessing & dataset merging for Chinese corpora
+
 asr:
   # Root directory of NCMMSC audio (contains AD / HC / MCI subfolders)
   data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
