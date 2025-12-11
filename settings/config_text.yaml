@@ -3,11 +3,12 @@
 # Central configuration for:
 #   - ASR on NCMMSC audio (Whisper)
 #   - Chinese text preprocessing & dataset merging
-#   - Text feature extraction + classifiers + K-fold CV (TF-IDF / BERT / GloVe / Gemma)
+#   - Text feature extraction + classifiers + K-fold CV
+#     (TF-IDF / BERT / GloVe / Gemma)
 # =====================================================================
 
 # ---------------------------------------------------------------------
-# 1. ASR (audio → transcript CSV) – used by asr_ncmmsc.py
+# ASR (audio → transcript CSV) – used by asr_ncmmsc.py
 # ---------------------------------------------------------------------
 asr:
   # Root directory of NCMMSC audio (contains AD / HC / MCI subfolders)
@@ -18,8 +19,8 @@ asr:
 
   # Whisper model settings
   model_size: "large-v2"
-  device: "cuda"          # "cuda" or "cpu"
-  compute_type: "float16" # e.g. "float16", "int8_float16", ...
+  device: "cuda"            # "cuda" or "cpu"
+  compute_type: "float16"   # e.g. "float16", "int8_float16", ...
 
   # Initial prompt given to Whisper (Chinese clinical context)
   initial_prompt: |-
@@ -53,14 +54,17 @@ asr:
     without_timestamps: true
 
 # ---------------------------------------------------------------------
-# 2. Text preprocessing & dataset merging – used by preprocess_chinese.py
+# Text preprocessing & dataset merging – used by preprocess_chinese.py
 # ---------------------------------------------------------------------
 text:
   # JSONL converted from ASR CSV for NCMMSC
   ncmmsc_jsonl: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
 
-  # Other Chinese datasets (already in JSONL)
+  # Other Chinese dataset (already in JSONL)
   predictive_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
+
+  # (Optional) TAUKADIAL JSONL – can be omitted if not available
+  # taukadial_jsonl: "/content/TAUKADIAL.jsonl"
 
   # Directory to store merged & preprocessed JSONL files
   output_dir: "/content/chinese_combined"
@@ -73,9 +77,8 @@ text:
   test_jsonl: "test_chinese.jsonl"
 
 # ---------------------------------------------------------------------
-# 3. Text feature & classifier settings – TF-IDF / BERT / GloVe / Gemma
-#    + K-fold cross-validation.  This block describes the *modeling*
-#    experiment that goes into the paper.
+#    Text features + classifiers (TF-IDF / BERT / GloVe / Gemma)
+#    + K-fold cross-validation
 # ---------------------------------------------------------------------
 features:
   # Which text feature method to run in the current experiment:
@@ -84,23 +87,20 @@ features:
 
   # ---------------- TF-IDF + Logistic Regression --------------------
   tfidf:
-    # CountVectorizer settings
     vectorizer:
       lowercase: true
       max_features: 20000
       ngram_range: [1, 2]      # (1, 2) = unigram + bigram
-      stop_words: null         # "english" / null / (你之後也可以自訂)
+      stop_words: null         # Chinese: keep null, or set your own list
       min_df: 1
       max_df: 1.0
 
-    # TfidfTransformer settings
     transformer:
       use_idf: true
       smooth_idf: true
       norm: "l2"
       sublinear_tf: false
 
-    # Logistic Regression hyper-parameters
     logreg:
       C: 1.0
       class_weight: "balanced"
@@ -110,13 +110,13 @@ features:
 
   # ---------------- BERT embeddings + Logistic Regression -----------
   bert:
-    # HF model name
-    model_name: "bert-base-uncased"   # or "bert-large-uncased"
-    pooling: "mean"                   # "mean" / "cls" / "last4_mean"
+    # For Chinese experiments, use a Chinese or multilingual model
+    # e.g. "bert-base-chinese" or "hfl/chinese-roberta-wwm-ext"
+    model_name: "bert-base-chinese"
+    pooling: "mean"            # "mean" / "cls" / "last4_mean"
     max_seq_length: 512
 
-    # Device config for BERT encoding
-    device: "cuda"                    # or "cpu"
+    device: "cuda"             # or "cpu"
 
     logreg:
       C: 1.0
@@ -126,8 +126,9 @@ features:
       random_state: 42
 
   # ---------------- GloVe embeddings + Logistic Regression ----------
+  # Mainly for English experiments (e.g. DementiaNet). Not used in the
+  # Chinese experiments unless you provide a Chinese embedding file.
   glove:
-    # Path to 300-dim GloVe vectors (you need to update this path)
     embeddings_path: "/path/to/Glove/glove300.txt"
     embedding_dim: 300
 
@@ -135,8 +136,7 @@ features:
     remove_stopwords: true
     stopwords_lang: "english"
 
-    # "sum_l2norm" = sum v_i then L2-normalize (what you’re doing now)
-    pooling: "sum_l2norm"
+    pooling: "sum_l2norm"   # sum v_i then L2-normalize
 
     logreg:
       C: 1.0
@@ -147,19 +147,14 @@ features:
 
   # ---------------- Gemma-2B embeddings + Logistic Regression -------
   gemma:
-    # HF model name for Gemma
     model_name: "google/gemma-2b"
+    pooling: "mean"          # sentence pooling over token embeddings
 
-    # Sentence pooling strategy over token embeddings
-    pooling: "mean"              # currently: last_hidden_state.mean(dim=1)
-
-    # Tokenizer behavior
     max_seq_length: 512
-    padding: "longest"           # "longest" / "max_length"
+    padding: "longest"       # "longest" / "max_length"
     truncation: true
 
-    # Device config for Gemma encoding
-    device: "cuda"               # or "cpu"
+    device: "cuda"           # or "cpu"
 
     logreg:
       C: 1.0
@@ -176,5 +171,4 @@ features:
     shuffle: true
     random_state: 42
 
-    # How to average precision/recall/F1 across classes
-    metrics_average: "macro"   # e.g. "macro" / "weighted"
+    metrics_average: "macro"   # "macro" / "weighted"
