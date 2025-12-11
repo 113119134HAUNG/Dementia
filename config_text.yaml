@@ -4,7 +4,6 @@ Central configuration for:
 - ASR on NCMMSC audio
 - Text preprocessing & dataset merging for Chinese corpora
 """
-
 asr:
   # Root directory of NCMMSC audio (contains AD / HC / MCI subfolders)
   data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
@@ -33,7 +32,7 @@ asr:
     對於 AD、MCI、HC 等縮寫，請以大寫英文字母保留。
     若有單字實在聽不清楚，請不要亂猜，可以以『[聽不清楚]』標示。
 
-# Decoding hyper-parameters for Whisper
+  # Decoding hyper-parameters for Whisper (all model-side settings live here)
   decode:
     language: "zh"
     task: "transcribe"
