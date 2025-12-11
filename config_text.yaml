@@ -1,46 +1,54 @@
-# config_text.yaml
-asr:
-  # NCMMSC 音檔根目錄（底下有 AD / HC / MCI 三個子資料夾）
-  data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
+  # -*- coding: utf-8 -*-
+"""
+enums.py
+這些定義在自動語音辨識、文字預處理和建模程式碼中均有使用，以確保標籤的一致性和可重複性。
+統一診斷標籤：重度、中度、輕度
+- AD  : Alzheimer / ProbableAD / PossibleAD
+- HC  : Healthy Control / NC / CTRL / Control
+- MCI : Mild Cognitive Impairment
+"""
 
-  # Whisper 轉錄後輸出的 CSV 路徑
-  output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
+from enum import Enum
+from typing import Optional
 
-  # Whisper 模型設定
-  model_size: "large-v2"
-  device: "cuda"
-  compute_type: "float16"
+class ADType(str, Enum):
+    AD = "AD"
+    HC = "HC"
+    MCI = "MCI"
 
-  # 提示詞
-  initial_prompt: |-
-    以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、
-    輕度認知障礙（MCI）與健康對照組（HC）的臨床訪談與語言測驗，
-    包括圖畫描述任務、語意流暢度測驗以及日常生活相關問答。
-    請以繁體中文完整逐字轉寫受試者與訪談者的口語內容，不要翻譯、
-    不要潤飾或做任何摘要，也不要自行更改語序或補上沒聽到的字。
-    請保留口語語氣詞與猶豫聲（例如：嗯、呃、啊、就是、然後）、
-    重複、修正、語法不完整或中斷的句子，這些特徵可能與認知功能相關。
-    遇到下列專有名詞或相關用語時，請盡量使用常見且一致的寫法：
-    「失智症」、「阿茲海默症」、「阿茲海默病」、「輕度認知障礙」、
-    「MCI」、「AD」、「HC」、「記憶力」、「認知功能」、
-    「量表」、「測驗」、「醫師」、「受試者」、「照顧者」。
-    對於 AD、MCI、HC 等縮寫，請以大寫英文字母保留。
-    若有單字實在聽不清楚，請不要亂猜，可以以『[聽不清楚]』標示。
+    @classmethod
+    def from_any(cls, label: Optional[str]) -> "ADType":
+        """Map a raw diagnosis string from any dataset to a canonical ADType.
 
-text:
-  # 由 ASR CSV 轉出來的 NCMMSC JSONL
-  ncmmsc_jsonl: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
+        Examples:
+            ADType.from_any("ProbableAD")  -> ADType.AD
+            ADType.from_any("CTRL")       -> ADType.HC
+            ADType.from_any("mci")        -> ADType.MCI
 
-  # 其他中文資料集 JSONL
-  predictive_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
-  taukadial_jsonl: "/content/TAUKADIAL.jsonl"
+        Raises:
+            ValueError: if the input label cannot be mapped.
+        """
+        if label is None:
+            raise ValueError("Diagnosis label is None")
 
-  # 合併後的輸出資料夾
-  output_dir: "/content/chinese_combined"
+        s = str(label).strip().upper()
 
-  # 合併後總 JSONL 檔名
-  combined_name: "Chinses_NCMMSC_iFlyTek_Taukdial.jsonl"
+        # AD family
+        if s in {"AD", "PROBABLEAD", "POSSIBLEAD"}:
+            return cls.AD
 
-  # 預處理後的 train / test 檔名
-  train_jsonl: "train_chinese.jsonl"
-  test_jsonl: "test_chinese.jsonl"
+        # HC family
+        if s in {"HC", "NC", "CTRL", "CONTROL"}:
+            return cls.HC
+
+        # MCI family
+        if s in {"MCI"}:
+            return cls.MCI
+
+        raise ValueError(f"Unknown diagnosis label: {label!r}")
+
+class DatasetSplit(str, Enum):
+    """Standard split names for train/valid/test."""
+    TRAIN = "train"
+    VALID = "valid"
+    TEST  = "test"
