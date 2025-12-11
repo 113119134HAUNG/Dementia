@@ -1,11 +1,38 @@
-# text_cleaning.py
+# -*- coding: utf-8 -*-
+"""
+text_cleaning.py
+
+Text cleaning utilities used at two levels:
+
+1. ASR-level cleaning (``clean_asr_chinese``):
+   - Normalize Zhuyin sequences (ㄚㄚㄚ → 嗯)
+   - Remove [聽不清楚] markers
+   - Compress whitespace
+
+2. Structured transcript cleaning (``clean_structured_chinese``):
+   - Remove speaker labels (Doctor:, Patient:, *PAR:, etc.)
+   - Strip CHAT-style annotations and brackets
+   - Keep disfluency markers like [+ gram] normalized
+
+3. A variant (``clean_structured_chinese_no_punct``) that additionally
+   removes punctuation, leaving only Chinese characters, Latin letters,
+   digits, and spaces.
+"""
+
+from __future__ import annotations
 
 import re
+from typing import Union
+
 import pandas as pd
 
-# ====== 給 ASR 用的：處理注音、聽不清楚 等 ======
+TextLike = Union[str, float]
 
-# 注音符號範圍，用來把 ㄚㄚㄚ 收斂成「嗯」
+# =====================================================================
+# ASR-level cleaning
+# =====================================================================
+
+# Zhuyin code point range: collapse sequences to a single "嗯"
 ZHUYIN_PATTERN = re.compile(
     r"[ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒ"
     r"ㄓㄔㄕㄖㄗㄘㄙ"
@@ -13,71 +40,87 @@ ZHUYIN_PATTERN = re.compile(
     r"ㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ]+"
 )
 
-def clean_asr_chinese(text: str) -> str:
+
+def clean_asr_chinese(text: TextLike) -> str:
+    """Light cleaning for Chinese ASR output."""
 
     if text is None or (isinstance(text, float) and pd.isna(text)):
         return ""
 
     t = str(text)
 
-    # 把 [聽不清楚] 拿掉，避免影響後處理
+    # Remove explicit [聽不清楚] markers
     t = t.replace("[聽不清楚]", " ")
 
-    # 連續注音 → 嗯
+    # Continuous Zhuyin sequences → 嗯
     t = ZHUYIN_PATTERN.sub("嗯", t)
 
-    # 多個「嗯」連在一起 → 一個
+    # Multiple 嗯 in a row → single 嗯
     t = re.sub(r"(嗯[\s、，,.!?]*){2,}", "嗯 ", t)
 
-    # 壓縮空白
+    # Compress whitespace
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
+# =====================================================================
+# Structured transcript cleaning
+# =====================================================================
 
-# ====== 處理 Doctor:/%mor/註記 等 ======
-def clean_structured_chinese(text: str) -> str:
-
+def clean_structured_chinese(text: TextLike) -> str:
+    """Remove speaker tags, CHAT annotations, and miscellaneous codes,
+    while keeping main Chinese/English text and disfluency markers.
+    """
     if text is None or (isinstance(text, float) and pd.isna(text)):
         return ""
 
     t = str(text)
 
-    # 先把全形空白換成一般空白
+    # Normalize non-breaking spaces
     t = t.replace("\u00A0", " ")
 
-    # 說話者標籤：Doctor: / Patient: / Interviewer: / Speaker 1:
+    # Speaker labels: Doctor: / Patient: / Interviewer: / Speaker 1:
     t = re.sub(r"\b(Doctor|Patient|Interviewer)\s*[:：]", "", t, flags=re.IGNORECASE)
     t = re.sub(r"Speaker\s*\d+\s*[:：]", "", t, flags=re.IGNORECASE)
-    
-    # 中文標籤可以加
+    # Chinese speaker labels
     t = re.sub(r"(醫生|病人|受試者)\s*[:：]", "", t)
 
-    # .cha 類型標記
-    t = re.sub(r"\d+_\d+", "", t)             # 時間標記 30_5640
+    # .cha-like markers
+    t = re.sub(r"\d+_\d+", "", t)             # time codes 30_5640
     t = re.sub(r"(%\w+|\*[A-Z]+):", "", t)    # %wor: *PAR:
     t = re.sub(r"\b\w+:\w+\|\w+", "", t)      # det:art|the n|scene
 
-    # 各種括號與註記
+    # Various brackets and annotations
     t = t.replace("‡", " ")
-    t = re.sub(r"\[\+ *gram\]", " [gram] ", t)  # 保留 [+ gram] 標準化
+    # Normalize [+ gram] → [gram]
+    t = re.sub(r"\[\+ *gram\]", " [gram] ", t)
 
-    t = re.sub(r"\[[^\]]*\]", " ", t)          # 其他中括號 [...]
-    t = re.sub(r"<[^>]*>", " ", t)             # <...>
-    t = re.sub(r"\([^)]*\)", " ", t)           # (...)
+    # Remove other bracketed content
+    t = re.sub(r"\[[^\]]*\]", " ", t)   # [...]
+    t = re.sub(r"<[^>]*>", " ", t)      # <...>
+    t = re.sub(r"\([^)]*\)", " ", t)    # (...)
 
-    # 研究者 codes
+    # Researcher codes
     t = re.sub(r"\+<[^>]*>", " ", t)   # +< ... >
-    t = re.sub(r"\+[^ ]*", " ", t)     # 其他 +code
-    t = re.sub(r"&\S+", " ", t)        # y&... 類型
+    t = re.sub(r"\+[^ ]*", " ", t)     # +code
+    t = re.sub(r"&\S+", " ", t)        # y&... etc.
 
-    # 壓縮空白
+    # Compress whitespace
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-# structured 清理，拔掉中英文標點，只留中英數字 + 空白
-def clean_structured_chinese_no_punct(text: str) -> str:
+def clean_structured_chinese_no_punct(text: TextLike) -> str:
+    """Structured cleaning + punctuation removal.
+
+    Keep only Chinese characters, ASCII letters, digits, and spaces.
+    """
     t = clean_structured_chinese(text)
-    t = re.sub(r"[，。、「」『』？！：；（）《》〈〉——…,.!?;:()\"“”'\-]", " ", t)
+    # Replace Chinese & English punctuation with spaces
+    t = re.sub(
+        r"[，。、「」『』？！：；（）《》〈〉——…,.!?;:()\"“”'\-]",
+        " ",
+        t,
+    )
+    # Remove remaining non [CJK / A-Z / a-z / 0-9 / space]
     t = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9\s]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
