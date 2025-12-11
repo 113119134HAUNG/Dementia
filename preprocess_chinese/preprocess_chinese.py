@@ -95,7 +95,6 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str) -> str:
     print(f"[INFO] Saved NCMMSC jsonl to: {jsonl_path}")
     return jsonl_path
 
-
 # ===== 工具：移除英文、長度篩選 =====
 def remove_english_rows(df: pd.DataFrame) -> pd.DataFrame:
     """移除 Languages == 'en' 的列（例如 TAUKADIAL 的英文部分）。"""
@@ -109,7 +108,6 @@ def filter_by_length(row: pd.Series, stats: pd.DataFrame) -> bool:
     mean = stats.loc[row["Diagnosis"], "mean"]
     std = stats.loc[row["Diagnosis"], "std"]
     return mean - std <= row["length"] <= mean + std
-
 
 # ===== 合併 JSONL =====
 def combine_jsonls(
@@ -139,7 +137,6 @@ def combine_jsonls(
     merged_path = os.path.join(output_dir, merged_name)
     print(f"[INFO] Combined jsonl saved to: {merged_path}")
     return merged_path
-
 
 # ===== 讀取 + 清理 + 長度篩選 =====
 def load_and_clean_chinese(merged_jsonl_path: str) -> pd.DataFrame:
@@ -172,7 +169,6 @@ def load_and_clean_chinese(merged_jsonl_path: str) -> pd.DataFrame:
 
     df = df[df.apply(filter_by_length, axis=1, stats=length_stats)]
     return df
-
 
 # ===== split + 儲存 =====
 def split_and_save(
@@ -211,7 +207,6 @@ def split_and_save(
     print(f"[INFO] Saved train to: {train_out}")
     print(f"[INFO] Saved test  to: {test_out}")
     return train_out, test_out
-
 
 # ===== 整體 pipeline =====
 def run_chinese_preprocessing(config_path: Optional[str] = None):
