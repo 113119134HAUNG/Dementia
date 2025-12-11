@@ -3,7 +3,9 @@
 preprocess_chinese.py
 
 中文文字資料預處理 pipeline（文本層，不含聲學）：
-    1. NCMMSC ASR CSV  →  NCMMSC 文字 JSONL（欄位對齊其他語料）
+
+    1. NCMMSC ASR CSV
+         → NCMMSC 文字 JSONL（欄位對齊其他語料）
     2. 合併多個中文語料：
          - NCMMSC2021_AD_Competition（從 ASR 來）
          - Chinese-predictive_challenge
@@ -19,6 +21,7 @@ preprocess_chinese.py
 
 - asr:
     - output_csv          : NCMMSC ASR 輸出 CSV（步驟 1 的輸入）
+
 - text:
     - ncmmsc_jsonl        : NCMMSC 轉出的中間 JSONL（步驟 1 的輸出）
     - predictive_jsonl    : Predictive 中文 JSONL
@@ -47,7 +50,7 @@ From CLI:
 import os
 import argparse
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -69,11 +72,11 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str) -> str:
         - duration
 
     Output JSONL schema (for downstream text modeling):
-        - ID                         : same as id
-        - Diagnosis                  : same as label (標籤統一交給 enums.ADType 處理)
+        - ID                           : same as id
+        - Diagnosis                    : same as label
         - Text_interviewer_participant : cleaned_transcript（文字層級）
-        - Dataset                    : 固定 "NCMMSC2021_AD_Competition"
-        - Languages                  : 固定 "zh"
+        - Dataset                      : 固定 "NCMMSC2021_AD_Competition"
+        - Languages                    : 固定 "zh"
     """
     df = pd.read_csv(csv_path, encoding="utf-8-sig")
 
@@ -92,6 +95,7 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str) -> str:
     print(f"[INFO] Saved NCMMSC jsonl to: {jsonl_path}")
     return jsonl_path
 
+
 # ===== 工具：移除英文、長度篩選 =====
 def remove_english_rows(df: pd.DataFrame) -> pd.DataFrame:
     """移除 Languages == 'en' 的列（例如 TAUKADIAL 的英文部分）。"""
@@ -99,11 +103,13 @@ def remove_english_rows(df: pd.DataFrame) -> pd.DataFrame:
         return df
     return df[df["Languages"] != "en"]
 
+
 def filter_by_length(row: pd.Series, stats: pd.DataFrame) -> bool:
     """依照 Diagnosis 的長度分布，做 mean±std 過濾極端樣本。"""
     mean = stats.loc[row["Diagnosis"], "mean"]
     std = stats.loc[row["Diagnosis"], "std"]
     return mean - std <= row["length"] <= mean + std
+
 
 # ===== 合併 JSONL =====
 def combine_jsonls(
@@ -115,8 +121,8 @@ def combine_jsonls(
 ) -> str:
     """合併三個中文語料成一個 JSONL。
 
-    Inputs
-    ------
+    Parameters
+    ----------
     ncmmsc_jsonl, predictive_jsonl, taukadial_jsonl : str
         三個語料的 JSONL 路徑。
     output_dir : str
@@ -134,12 +140,13 @@ def combine_jsonls(
     print(f"[INFO] Combined jsonl saved to: {merged_path}")
     return merged_path
 
+
 # ===== 讀取 + 清理 + 長度篩選 =====
 def load_and_clean_chinese(merged_jsonl_path: str) -> pd.DataFrame:
     """讀取合併 JSONL，做標籤清理、語言過濾、結構性文字清理與長度過濾。"""
     df = pd.read_json(merged_jsonl_path, lines=True)
 
-    # 找出沒有標籤的列
+    # 找出沒有標籤的列（方便 debug）
     unknown = df[df["Diagnosis"] == "Unknown"]
     if not unknown.empty:
         print("Diagnosis == 'Unknown' 的 Dataset：", set(unknown["Dataset"]))
@@ -166,13 +173,14 @@ def load_and_clean_chinese(merged_jsonl_path: str) -> pd.DataFrame:
     df = df[df.apply(filter_by_length, axis=1, stats=length_stats)]
     return df
 
+
 # ===== split + 儲存 =====
 def split_and_save(
     df: pd.DataFrame,
     output_dir: str,
     train_name: str,
     test_name: str,
-):
+) -> Tuple[str, str]:
     """做 stratified train/test split 並存成 JSONL。
 
     Parameters
@@ -204,6 +212,7 @@ def split_and_save(
     print(f"[INFO] Saved test  to: {test_out}")
     return train_out, test_out
 
+
 # ===== 整體 pipeline =====
 def run_chinese_preprocessing(config_path: Optional[str] = None):
     """主入口：從 config_text.yaml 讀取所有路徑，執行完整中文預處理流程。
@@ -221,7 +230,6 @@ def run_chinese_preprocessing(config_path: Optional[str] = None):
     # ASR CSV → NCMMSC JSONL
     asr_csv_path = asr_cfg["output_csv"]
     ncmmsc_jsonl_path = text_cfg["ncmmsc_jsonl"]
-
     csv_to_ncmmsc_jsonl(asr_csv_path, ncmmsc_jsonl_path)
 
     # 合併 NCMMSC + Predictive + TAUKADIAL
@@ -246,22 +254,13 @@ def run_chinese_preprocessing(config_path: Optional[str] = None):
 
 # ===== CLI =====
 def build_arg_parser() -> argparse.ArgumentParser:
-    """極簡 CLI：只讓你指定 config 檔路徑，其餘全部交給 YAML 管理。"""
-    parser = argparse.ArgumentParser(
-        description="Preprocess Chinese AD datasets (NCMMSC + Predictive + TAUKADIAL) – config-driven."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="config_text.yaml 路徑（預設使用專案根目錄的 config_text.yaml）",
-    )
+    parser = argparse.ArgumentParser(description="Preprocess Chinese AD datasets (NCMMSC + Predictive + TAUKADIAL) – config-driven.")
+    parser.add_argument("--config",type=str,default=None,help="config_text.yaml 路徑（預設使用專案根目錄的 config_text.yaml）",)
     return parser
 
-def cli_main():
+def cli_main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
-
     run_chinese_preprocessing(config_path=args.config)
 
 if __name__ == "__main__":
