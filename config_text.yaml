@@ -33,6 +33,21 @@ asr:
     對於 AD、MCI、HC 等縮寫，請以大寫英文字母保留。
     若有單字實在聽不清楚，請不要亂猜，可以以『[聽不清楚]』標示。
 
+# Decoding hyper-parameters for Whisper
+  decode:
+    language: "zh"
+    task: "transcribe"
+    beam_size: 10
+    patience: 1.0
+    length_penalty: 1.0
+    temperature: 0.0
+    compression_ratio_threshold: 2.4
+    log_prob_threshold: -1.0
+    no_speech_threshold: 0.6
+    condition_on_previous_text: true
+    vad_filter: false
+    without_timestamps: true
+
 text:
   # JSONL converted from ASR CSV for NCMMSC
   ncmmsc_jsonl: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
