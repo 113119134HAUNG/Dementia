@@ -1,13 +1,26 @@
 # config_text.yaml
-# Central configuration for:
-# - ASR on NCMMSC audio
-# - Text preprocessing & dataset merging for Chinese corpora
+# ------------------------------------------------------------------
+# Central configuration for this project:
+#
+#   1) ASR stage  : asr_ncmmsc.py
+#        - NCMMSC2021 中文語音
+#        - Whisper 轉錄 → CSV
+#
+#   2) Text stage : preprocess_chinese.py
+#        - ASR CSV + 其他中文語料 (Predictive / TAUKADIAL)
+#        - 合併、清理、長度篩選、train/test split → JSONL
+#
+# 這份 YAML 是整個 pipeline 的 single source of truth，
+# 實驗設定（路徑 / 檔名 / 解碼超參）都應該只修改這裡。
+# ------------------------------------------------------------------
 
 asr:
+  # ---- Used by: asr_ncmmsc.py ----
   # Root directory of NCMMSC audio (contains AD / HC / MCI subfolders)
   data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
 
-  # Output ASR CSV
+  # Output ASR CSV (input to text preprocessing stage)
+  # Schema defined in asr_io.py (id, label, transcript, cleaned_transcript, audio_path, duration)
   output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
 
   # Whisper model settings
@@ -16,6 +29,7 @@ asr:
   compute_type: "float16"
 
   # Initial prompt given to Whisper (Chinese clinical context)
+  # Paper-style: this block can be directly quoted in Method / Appendix.
   initial_prompt: |-
     以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、
     輕度認知障礙（MCI）與健康對照組（HC）的臨床訪談與語言測驗，
@@ -32,6 +46,7 @@ asr:
     若有單字實在聽不清楚，請不要亂猜，可以以『[聽不清楚]』標示。
 
   # Decoding hyper-parameters for Whisper (all model-side settings live here)
+  # Used by: asr_ncmmsc.build_decode_kwargs()
   decode:
     language: "zh"
     task: "transcribe"
@@ -47,19 +62,26 @@ asr:
     without_timestamps: true
 
 text:
+  # ---- Used by: preprocess_chinese.py ----
+
   # JSONL converted from ASR CSV for NCMMSC
+  # (output of csv_to_ncmmsc_jsonl; intermediate file)
   ncmmsc_jsonl: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
 
-  # Other Chinese datasets (already in JSONL)
+  # Other Chinese datasets (already in JSONL, as released by organizers / prior steps)
   predictive_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
   taukadial_jsonl: "/content/TAUKADIAL.jsonl"
 
-  # Directory to store merged & preprocessed JSONL files
+  # Directory to store:
+  #   - merged Chinese corpus
+  #   - final train / test JSONL
   output_dir: "/content/chinese_combined"
 
   # Name of merged JSONL combining all Chinese datasets
+  # Produced by JSONLCombiner in preprocess_chinese.combine_jsonls()
   combined_name: "Chinese_NCMMSC_iFlyTek_Taukdial.jsonl"
 
-  # Filenames for final train/test splits (written into output_dir)
+  # Filenames for final train/test splits (relative to output_dir)
+  # Produced by preprocess_chinese.split_and_save()
   train_jsonl: "train_chinese.jsonl"
   test_jsonl: "test_chinese.jsonl"
