@@ -4,7 +4,6 @@ import re
 from pathlib import Path
 from faster_whisper import WhisperModel
 
-# 盡量使用 notebook / 終端都適用的 tqdm
 try:
     from tqdm.auto import tqdm
     HAS_TQDM = True
@@ -15,11 +14,10 @@ except ImportError:
 DATA_ROOT = Path("/content/NCMMSC2021_AD_Competition-dev/dataset/merge")
 OUTPUT_CSV = Path("ncmmsc_merged_asr_transcripts.csv")
 
-# 以「品質」為優先的設定
 MODEL_SIZE = "large-v2"
 DEVICE = "cuda"
 COMPUTE_TYPE = "float16"
-# 如果語料有特定風格/專有名詞，可以在這裡給提示（沒有就設 None）
+
 INITIAL_PROMPT = (
     "以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、"
     "輕度認知障礙（MCI）與健康對照組（HC）的臨床訪談與語言測驗，"
@@ -36,40 +34,43 @@ INITIAL_PROMPT = (
     "若有單字實在聽不清楚，請不要亂猜，可以以『[聽不清楚]』標示。"
 )
 
-# 標籤與子資料夾對應
 LABEL_DIRS = {
     "AD": "AD",
     "HC": "HC",
     "MCI": "MCI",
 }
 
-# 要接受的音訊副檔名
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
 
-# ========= 工具函式 =========
+# ---- 簡單中文清理，跟下面 JSONL 版同精神 ----
+ZHUYIN_PATTERN = re.compile(r"[ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ]+")
+
+def clean_chinese_transcript(text: str) -> str:
+    t = str(text)
+    t = t.replace("[聽不清楚]", " ")
+    t = ZHUYIN_PATTERN.sub("嗯", t)
+    t = re.sub(r"(嗯[\s、，,.!?]*){2,}", "嗯 ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
 def iter_audio_files(data_root: Path, label_dirs: dict):
-    """依序產生 (label, sample_id, audio_path)"""
     for label, subdir in label_dirs.items():
         audio_dir = data_root / subdir
         if not audio_dir.is_dir():
             print(f"[WARN] 資料夾不存在，略過：{audio_dir}")
             continue
-
         for fname in sorted(os.listdir(audio_dir)):
             ext = Path(fname).suffix.lower()
             if ext not in AUDIO_EXTS:
                 continue
-
             audio_path = audio_dir / fname
             sample_id = f"{label}_{audio_path.stem}"
             yield label, sample_id, str(audio_path)
 
-# ========= 主流程 =========
 def main():
     print(f"Loading Whisper model: {MODEL_SIZE} on {DEVICE} ({COMPUTE_TYPE})")
     model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
 
-    # 欄位
     fieldnames = ["id", "label", "transcript", "cleaned_transcript",
                   "audio_path", "duration"]
 
@@ -77,7 +78,6 @@ def main():
     total_files = len(files)
     print(f"Found {total_files} audio files.")
 
-    # 參數
     decode_kwargs = dict(
         language="zh",
         task="transcribe",
@@ -107,21 +107,16 @@ def main():
             label, sample_id, audio_path = item
 
             if HAS_TQDM:
-                # 在進度條後面顯示目前檔名
                 iterable.set_postfix_str(Path(audio_path).name)
             else:
                 print(f"[INFO] Transcribing {audio_path} ...")
 
             try:
                 segments, info = model.transcribe(audio_path, **decode_kwargs)
-
-                full_text = " ".join(
-                    seg.text.strip() for seg in segments if seg.text.strip()
-                )
+                full_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
                 duration = getattr(info, "duration", 0.0)
-
+                cleaned = clean_chinese_transcript(full_text)
                 ok_count += 1
-
             except Exception as e:
                 print(f"[ERROR] 無法轉錄 {audio_path}: {e}")
                 full_text = ""
