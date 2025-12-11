@@ -1,11 +1,12 @@
-# muisc_to_text.py
+# asr_ncmmsc.py
 
-# ========= 基本套件 =========
 import os
 import csv
-import re
 from pathlib import Path
+import argparse
+
 from faster_whisper import WhisperModel
+from text_cleaning import clean_asr_chinese
 
 try:
     from tqdm.auto import tqdm
@@ -13,9 +14,9 @@ try:
 except ImportError:
     HAS_TQDM = False
 
-# ========= 預設設定（當成預設參數用） =========
+# ========= 預設設定 =========
 DEFAULT_DATA_ROOT = Path("/content/NCMMSC2021_AD_Competition-dev/dataset/merge")
-DEFAULT_OUTPUT_CSV = Path("ncmmsc_merged_asr_transcripts.csv")
+DEFAULT_OUTPUT_CSV = Path("/content/ncmmsc_merged_asr_transcripts.csv")
 
 DEFAULT_MODEL_SIZE = "large-v2"
 DEFAULT_DEVICE = "cuda"
@@ -45,24 +46,9 @@ LABEL_DIRS = {
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
 
-# ---- 簡單中文清理，跟預處理 JSONL 版同精神 ----
-ZHUYIN_PATTERN = re.compile(r"[ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ]+")
-
-def clean_chinese_transcript(text: str) -> str:
-    t = str(text)
-    t = t.replace("[聽不清楚]", " ")
-    t = ZHUYIN_PATTERN.sub("嗯", t)
-    t = re.sub(r"(嗯[\s、，,.!?]*){2,}", "嗯 ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-
-def iter_audio_files(data_root: Path, label_dirs: dict):
-    """
-    產生 (label, sample_id, audio_path)。
-    data_root: 根資料夾，例如 /content/.../merge
-    """
-    for label, subdir in label_dirs.items():
+# ===== 產生 (label, sample_id, audio_path) =====
+def iter_audio_files(data_root: Path):
+    for label, subdir in LABEL_DIRS.items():
         audio_dir = data_root / subdir
         if not audio_dir.is_dir():
             print(f"[WARN] 資料夾不存在，略過：{audio_dir}")
@@ -76,8 +62,7 @@ def iter_audio_files(data_root: Path, label_dirs: dict):
             yield label, sample_id, str(audio_path)
 
 
-# ========= 工具函式：給 notebook 或其他程式呼叫 =========
-def run_transcription(
+def run_ncmmsc_asr(
     data_root: Path = DEFAULT_DATA_ROOT,
     output_csv: Path = DEFAULT_OUTPUT_CSV,
     model_size: str = DEFAULT_MODEL_SIZE,
@@ -86,21 +71,19 @@ def run_transcription(
     initial_prompt: str = DEFAULT_INITIAL_PROMPT,
 ):
     """
-    主要的轉錄流程：
-    - data_root: 音檔的根目錄（底下有 AD/HC/MCI 子資料夾）
-    - output_csv: 輸出的 CSV 檔名 / 路徑
-    - model_size, device, compute_type, initial_prompt: Whisper 相關設定
+    NCMMSC 音檔 → Whisper ASR → 一個 CSV（含 transcript & cleaned_transcript）
     """
+    data_root = Path(data_root)
+    output_csv = Path(output_csv)
 
-    print(f"Loading Whisper model: {model_size} on {device} ({compute_type})")
+    print(f"[INFO] Loading Whisper model: {model_size} on {device} ({compute_type})")
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-    fieldnames = ["id", "label", "transcript", "cleaned_transcript",
-                  "audio_path", "duration"]
+    fieldnames = ["id", "label", "transcript", "cleaned_transcript", "audio_path", "duration"]
 
-    files = list(iter_audio_files(data_root, LABEL_DIRS))
+    files = list(iter_audio_files(data_root))
     total_files = len(files)
-    print(f"Found {total_files} audio files.")
+    print(f"[INFO] Found {total_files} audio files under {data_root}")
 
     decode_kwargs = dict(
         language="zh",
@@ -121,9 +104,6 @@ def run_transcription(
     ok_count = 0
     err_count = 0
 
-    # 確保 output_csv 是 Path 物件
-    output_csv = Path(output_csv)
-
     with output_csv.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -140,11 +120,9 @@ def run_transcription(
 
             try:
                 segments, info = model.transcribe(audio_path, **decode_kwargs)
-                full_text = " ".join(
-                    seg.text.strip() for seg in segments if seg.text.strip()
-                )
+                full_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
                 duration = getattr(info, "duration", 0.0)
-                cleaned = clean_chinese_transcript(full_text)
+                cleaned = clean_asr_chinese(full_text)
                 ok_count += 1
             except Exception as e:
                 print(f"[ERROR] 無法轉錄 {audio_path}: {e}")
@@ -153,22 +131,39 @@ def run_transcription(
                 duration = 0.0
                 err_count += 1
 
-            writer.writerow({
-                "id": sample_id,
-                "label": label,
-                "transcript": full_text,
-                "cleaned_transcript": cleaned,
-                "audio_path": audio_path,
-                "duration": duration,
-            })
+            writer.writerow(
+                {
+                    "id": sample_id,
+                    "label": label,
+                    "transcript": full_text,
+                    "cleaned_transcript": cleaned,
+                    "audio_path": audio_path,
+                    "duration": duration,
+                }
+            )
 
-    print(f"\nDone. Saved {total_files} rows to {output_csv} "
-          f"(ok={ok_count}, error={err_count})")
+    print(f"\n[INFO] Done. Saved {total_files} rows to {output_csv} (ok={ok_count}, error={err_count})")
 
+# ===== CLI =====
+def build_arg_parser():
+    parser = argparse.ArgumentParser(description="Run Whisper ASR on NCMMSC audio and export CSV.")
+    parser.add_argument("--data-root", type=str, default=str(DEFAULT_DATA_ROOT), help="音檔根目錄")
+    parser.add_argument("--output-csv", type=str, default=str(DEFAULT_OUTPUT_CSV), help="輸出 CSV 路徑")
+    parser.add_argument("--model-size", type=str, default=DEFAULT_MODEL_SIZE, help="Whisper 模型大小")
+    parser.add_argument("--device", type=str, default=DEFAULT_DEVICE, help="運算裝置：cuda / cpu")
+    parser.add_argument("--compute-type", type=str, default=DEFAULT_COMPUTE_TYPE, help="計算型態：float16 等")
+    return parser
 
-# ========= 保留 CLI 支援 =========
-def main():
-    run_transcription()
+def cli_main():
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    run_ncmmsc_asr(
+        data_root=Path(args.data_root),
+        output_csv=Path(args.output_csv),
+        model_size=args.model_size,
+        device=args.device,
+        compute_type=args.compute_type,
+    )
 
 if __name__ == "__main__":
-    main()
+    cli_main()
