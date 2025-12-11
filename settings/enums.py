@@ -16,7 +16,9 @@ Dataset splits:
 from enum import Enum
 from typing import Optional
 
+
 class ADType(str, Enum):
+    """Canonical 3-way diagnosis labels: AD / HC / MCI."""
     AD = "AD"
     HC = "HC"
     MCI = "MCI"
@@ -53,7 +55,7 @@ class ADType(str, Enum):
             return cls.HC
 
         # MCI family
-        if s in {"MCI"}:
+        if s == "MCI":
             return cls.MCI
 
         raise ValueError(f"Unknown diagnosis label: {label!r}")
