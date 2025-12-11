@@ -1,14 +1,16 @@
 # =====================================================================
 # config_text.yaml
+#
 # Central configuration for:
-#   - ASR on NCMMSC audio (Whisper)
-#   - Chinese text preprocessing & dataset merging
-#   - Text feature extraction + classifiers + K-fold CV
-#     (TF-IDF / BERT / GloVe / Gemma)
+#   1. ASR on NCMMSC audio (Whisper)
+#   2. Predictive dataset preprocessing (TSV + eGeMAPS)
+#   3. Chinese text preprocessing & dataset merging
+#   4. Text features + classifiers + K-fold CV
+#      (TF-IDF / BERT / GloVe / Gemma)
 # =====================================================================
 
 # ---------------------------------------------------------------------
-# ASR (audio → transcript CSV) – used by asr_ncmmsc.py
+#   ASR (audio → transcript CSV) – used by asr_ncmmsc.py
 # ---------------------------------------------------------------------
 asr:
   # Root directory of NCMMSC audio (contains AD / HC / MCI subfolders)
@@ -22,7 +24,7 @@ asr:
   device: "cuda"            # "cuda" or "cpu"
   compute_type: "float16"   # e.g. "float16", "int8_float16", ...
 
-  # Initial prompt given to Whisper (Chinese clinical context)
+  # Initial prompt for Whisper (Chinese clinical context)
   initial_prompt: |-
     以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、
     輕度認知障礙（MCI）與健康對照組（HC）的臨床訪談與語言測驗，
@@ -54,13 +56,34 @@ asr:
     without_timestamps: true
 
 # ---------------------------------------------------------------------
-# Text preprocessing & dataset merging – used by preprocess_chinese.py
+#    Predictive dataset (TSV + eGeMAPS) – used by preprocess_predictive.py
+# ---------------------------------------------------------------------
+predictive:
+  # Original meta file with labels and demographics
+  # (e.g., uuid, label, sex, age, education)
+  meta_csv: "/content/predictive/2_final_list_train.csv"
+
+  # eGeMAPS feature table (one row per uuid)
+  egemaps_csv: "/content/predictive/egemaps_final.csv"
+
+  # Directory containing per-utterance TSV transcripts (Pxxxx_xxxx.tsv)
+  tsv_root: "/content/predictive/tsv"
+
+  # Output text JSONL (will later be used by `text.predictive_jsonl`)
+  output_text_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
+
+  # Output eGeMAPS feature CSV for acoustic experiments
+  output_egemaps_csv: "/content/predictive_egemaps_features.csv"
+
+# ---------------------------------------------------------------------
+#    Text preprocessing & dataset merging – used by preprocess_chinese.py
 # ---------------------------------------------------------------------
 text:
   # JSONL converted from ASR CSV for NCMMSC
   ncmmsc_jsonl: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
 
-  # Other Chinese dataset (already in JSONL)
+  # Chinese predictive dataset in JSONL form
+  # (produced by preprocess_predictive.py → predictive.output_text_jsonl)
   predictive_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
 
   # (Optional) TAUKADIAL JSONL – can be omitted if not available
@@ -136,7 +159,8 @@ features:
     remove_stopwords: true
     stopwords_lang: "english"
 
-    pooling: "sum_l2norm"   # sum v_i then L2-normalize
+    # sentence embedding = sum(v_i) then L2-normalize
+    pooling: "sum_l2norm"
 
     logreg:
       C: 1.0
