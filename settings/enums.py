@@ -1,11 +1,16 @@
-  # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 enums.py
-這些定義在自動語音辨識、文字預處理和建模程式碼中均有使用，以確保標籤的一致性和可重複性。
-統一診斷標籤：重度、中度、輕度
-- AD  : Alzheimer / ProbableAD / PossibleAD
-- HC  : Healthy Control / NC / CTRL / Control
-- MCI : Mild Cognitive Impairment
+
+Canonical enums used across ASR, text preprocessing, and modeling.
+
+Diagnosis labels (3-way):
+    - AD  : Alzheimer (ProbableAD / PossibleAD / AD)
+    - HC  : Healthy controls (HC / NC / CTRL / CONTROL)
+    - MCI : Mild Cognitive Impairment
+
+Dataset splits:
+    - TRAIN / VALID / TEST
 """
 
 from enum import Enum
@@ -20,13 +25,19 @@ class ADType(str, Enum):
     def from_any(cls, label: Optional[str]) -> "ADType":
         """Map a raw diagnosis string from any dataset to a canonical ADType.
 
-        Examples:
-            ADType.from_any("ProbableAD")  -> ADType.AD
-            ADType.from_any("CTRL")       -> ADType.HC
-            ADType.from_any("mci")        -> ADType.MCI
+        Examples
+        --------
+        >>> ADType.from_any("ProbableAD")
+        <ADType.AD: 'AD'>
+        >>> ADType.from_any("CTRL")
+        <ADType.HC: 'HC'>
+        >>> ADType.from_any("mci")
+        <ADType.MCI: 'MCI'>
 
-        Raises:
-            ValueError: if the input label cannot be mapped.
+        Raises
+        ------
+        ValueError
+            If the input label cannot be mapped.
         """
         if label is None:
             raise ValueError("Diagnosis label is None")
@@ -51,4 +62,4 @@ class DatasetSplit(str, Enum):
     """Standard split names for train/valid/test."""
     TRAIN = "train"
     VALID = "valid"
-    TEST  = "test"
+    TEST = "test"
