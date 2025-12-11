@@ -3,18 +3,20 @@
 preprocess_chinese.py
 
 Config-driven preprocessing pipeline for Chinese AD text data
-(text layer only, no acoustic features):
+(text layer only, no acoustic features).
 
-    1. NCMMSC ASR CSV
-         → NCMMSC JSONL (schema aligned with other corpora)
-    2. Merge multiple Chinese corpora:
-         - NCMMSC2021_AD_Competition (from ASR)
-         - Chinese-predictive_challenge
-         - (optional) TAUKADIAL Chinese subset
-    3. Normalize diagnosis labels + remove English rows
-    4. Structural text cleaning (Doctor:/%mor/ annotations, etc.)
-    5. Length-based outlier filtering (per Diagnosis: mean ± std)
-    6. Stratified train/test split → JSONL
+Steps
+-----
+1. NCMMSC ASR CSV
+       → NCMMSC JSONL (schema aligned with other corpora)
+2. Merge multiple Chinese corpora:
+       - NCMMSC2021_AD_Competition (from ASR)
+       - Chinese-predictive_challenge
+       - (optional) TAUKADIAL Chinese subset
+3. Normalize diagnosis labels + remove English rows
+4. Structural text cleaning (Doctor:/%mor/ annotations, etc.)
+5. Length-based outlier filtering (per Diagnosis: mean ± std)
+6. Stratified train/test split → JSONL
 
 Configuration (single source of truth)
 --------------------------------------
@@ -32,6 +34,7 @@ All paths come from ``config_text.yaml``:
     - train_jsonl      : train split filename
     - test_jsonl       : test  split filename
 """
+
 import argparse
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -59,9 +62,7 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str) -> str:
             "ID": df["id"],
             "Diagnosis": df["label"],
             "Text_interviewer_participant": df["cleaned_transcript"].fillna(""),
-            "Dataset": "NCMMSC2022021_AD_Competition"
-            if False
-            else "NCMMSC2021_AD_Competition",
+            "Dataset": "NCMMSC2021_AD_Competition",
             "Languages": "zh",
         }
     )
@@ -76,11 +77,10 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str) -> str:
 # =====================================================================
 
 def remove_english_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove rows where Languages == 'en' (e.g. TAUKADIAL English part)."""
+    """Remove rows where Languages == 'en' (e.g., TAUKADIAL English part)."""
     if "Languages" not in df.columns:
         return df
     return df[df["Languages"] != "en"]
-
 
 def filter_by_length(row: pd.Series, stats: pd.DataFrame) -> bool:
     """Keep samples whose length is within mean ± std for each Diagnosis."""
@@ -110,7 +110,7 @@ def combine_jsonls(
     output_dir : str
         Output directory for merged JSONL.
     merged_name : str
-        Output filename, e.g. "Chinese_NCMMSC_iFlyTek.jsonl".
+        Output filename, e.g., "Chinese_NCMMSC_iFlyTek.jsonl".
     """
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
@@ -131,7 +131,7 @@ def combine_jsonls(
     return str(merged_path)
 
 # =====================================================================
-# Load + clean + length filtering
+# 4. Load + clean + length filtering
 # =====================================================================
 
 def load_and_clean_chinese(merged_jsonl_path: str) -> pd.DataFrame:
@@ -264,6 +264,7 @@ def run_chinese_preprocessing(
 # =====================================================================
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """Build CLI argument parser for Chinese preprocessing."""
     parser = argparse.ArgumentParser(
         description=(
             "Preprocess Chinese AD datasets "
