@@ -1,3 +1,6 @@
+# muisc_to_text.py
+
+# ========= 基本套件 =========
 import os
 import csv
 import re
@@ -10,15 +13,15 @@ try:
 except ImportError:
     HAS_TQDM = False
 
-# ========= 基本設定 =========
-DATA_ROOT = Path("/content/NCMMSC2021_AD_Competition-dev/dataset/merge")
-OUTPUT_CSV = Path("ncmmsc_merged_asr_transcripts.csv")
+# ========= 預設設定（當成預設參數用） =========
+DEFAULT_DATA_ROOT = Path("/content/NCMMSC2021_AD_Competition-dev/dataset/merge")
+DEFAULT_OUTPUT_CSV = Path("ncmmsc_merged_asr_transcripts.csv")
 
-MODEL_SIZE = "large-v2"
-DEVICE = "cuda"
-COMPUTE_TYPE = "float16"
+DEFAULT_MODEL_SIZE = "large-v2"
+DEFAULT_DEVICE = "cuda"
+DEFAULT_COMPUTE_TYPE = "float16"
 
-INITIAL_PROMPT = (
+DEFAULT_INITIAL_PROMPT = (
     "以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、"
     "輕度認知障礙（MCI）與健康對照組（HC）的臨床訪談與語言測驗，"
     "包括圖畫描述任務、語意流暢度測驗以及日常生活相關問答。"
@@ -42,7 +45,7 @@ LABEL_DIRS = {
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
 
-# ---- 簡單中文清理，跟下面 JSONL 版同精神 ----
+# ---- 簡單中文清理，跟預處理 JSONL 版同精神 ----
 ZHUYIN_PATTERN = re.compile(r"[ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ]+")
 
 def clean_chinese_transcript(text: str) -> str:
@@ -53,7 +56,12 @@ def clean_chinese_transcript(text: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
+
 def iter_audio_files(data_root: Path, label_dirs: dict):
+    """
+    產生 (label, sample_id, audio_path)。
+    data_root: 根資料夾，例如 /content/.../merge
+    """
     for label, subdir in label_dirs.items():
         audio_dir = data_root / subdir
         if not audio_dir.is_dir():
@@ -67,14 +75,30 @@ def iter_audio_files(data_root: Path, label_dirs: dict):
             sample_id = f"{label}_{audio_path.stem}"
             yield label, sample_id, str(audio_path)
 
-def main():
-    print(f"Loading Whisper model: {MODEL_SIZE} on {DEVICE} ({COMPUTE_TYPE})")
-    model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+
+# ========= 工具函式：給 notebook 或其他程式呼叫 =========
+def run_transcription(
+    data_root: Path = DEFAULT_DATA_ROOT,
+    output_csv: Path = DEFAULT_OUTPUT_CSV,
+    model_size: str = DEFAULT_MODEL_SIZE,
+    device: str = DEFAULT_DEVICE,
+    compute_type: str = DEFAULT_COMPUTE_TYPE,
+    initial_prompt: str = DEFAULT_INITIAL_PROMPT,
+):
+    """
+    主要的轉錄流程：
+    - data_root: 音檔的根目錄（底下有 AD/HC/MCI 子資料夾）
+    - output_csv: 輸出的 CSV 檔名 / 路徑
+    - model_size, device, compute_type, initial_prompt: Whisper 相關設定
+    """
+
+    print(f"Loading Whisper model: {model_size} on {device} ({compute_type})")
+    model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
     fieldnames = ["id", "label", "transcript", "cleaned_transcript",
                   "audio_path", "duration"]
 
-    files = list(iter_audio_files(DATA_ROOT, LABEL_DIRS))
+    files = list(iter_audio_files(data_root, LABEL_DIRS))
     total_files = len(files)
     print(f"Found {total_files} audio files.")
 
@@ -90,14 +114,17 @@ def main():
         no_speech_threshold=0.6,
         condition_on_previous_text=True,
         vad_filter=False,
-        initial_prompt=INITIAL_PROMPT,
+        initial_prompt=initial_prompt,
         without_timestamps=True,
     )
 
     ok_count = 0
     err_count = 0
 
-    with OUTPUT_CSV.open("w", newline="", encoding="utf-8-sig") as f:
+    # 確保 output_csv 是 Path 物件
+    output_csv = Path(output_csv)
+
+    with output_csv.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
@@ -113,7 +140,9 @@ def main():
 
             try:
                 segments, info = model.transcribe(audio_path, **decode_kwargs)
-                full_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
+                full_text = " ".join(
+                    seg.text.strip() for seg in segments if seg.text.strip()
+                )
                 duration = getattr(info, "duration", 0.0)
                 cleaned = clean_chinese_transcript(full_text)
                 ok_count += 1
@@ -133,8 +162,13 @@ def main():
                 "duration": duration,
             })
 
-    print(f"\nDone. Saved {total_files} rows to {OUTPUT_CSV} "
+    print(f"\nDone. Saved {total_files} rows to {output_csv} "
           f"(ok={ok_count}, error={err_count})")
+
+
+# ========= 保留 CLI 支援 =========
+def main():
+    run_transcription()
 
 if __name__ == "__main__":
     main()
