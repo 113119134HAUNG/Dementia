@@ -2,65 +2,68 @@
 """
 asr_ncmmsc.py
 
-NCMMSC2021 中文語音資料：
-    音檔 (AD / HC / MCI)
+Run Whisper ASR on the NCMMSC2021 Chinese audio dataset:
+
+    audio (AD / HC / MCI)
         → Whisper ASR
-        → CSV（含 transcript & cleaned_transcript）
+        → CSV (transcript + cleaned_transcript)
 
 Configuration (single source of truth)
 --------------------------------------
-All paths and model settings are taken from ``config_text.yaml`` (section ``asr``):
+All paths and model settings are read from ``config_text.yaml`` (section ``asr``):
 
-    - data_root      : root directory with subfolders AD / HC / MCI
-    - output_csv     : where the ASR CSV will be written
-    - model_size     : Whisper model size (e.g. "large-v2")
-    - device         : "cuda" / "cpu"
-    - compute_type   : "float16", ...
-    - initial_prompt : Chinese clinical prompt
-    - decode         : dict of Whisper decoding hyperparameters
+    asr:
+      data_root      : root directory with subfolders AD / HC / MCI
+      output_csv     : ASR CSV output path
+      model_size     : Whisper model size (e.g. "large-v2")
+      device         : "cuda" / "cpu"
+      compute_type   : "float16", ...
+      initial_prompt : Chinese clinical prompt
+      decode         : dict of Whisper decoding hyper-parameters
 
-Separation of Concerns
-----------------------
-- This module is responsible **only** for:
+This module is responsible for:
     - discovering audio files
     - running Whisper
-    - counting successes / failures
-
-- CSV schema, cleaning, and writing are delegated to :mod:`asr_io`.
+    - writing ASR results to CSV (schema & cleaning via :mod:`asr_io`)
 """
 
 import argparse
 from pathlib import Path
-from typing import Dict, Any, Iterable, Tuple, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from faster_whisper import WhisperModel
 
-from config_utils import get_asr_config
 from asr_io import open_asr_csv_writer, write_asr_row_with_cleaning
+from config_utils import get_asr_config
 
 try:
     from tqdm.auto import tqdm
+
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
 
-# 資料夾名稱 → 診斷標籤（與 ADType.AD / ADType.HC / ADType.MCI 一致）
+
+# Folder name → diagnosis label (aligned with ADType.AD / HC / MCI)
 LABEL_DIRS: Dict[str, str] = {
     "AD": "AD",
     "HC": "HC",
     "MCI": "MCI",
 }
 
-# 可接受的音訊副檔名
+# Accepted audio extensions
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
 
-# ===== 掃資料夾，產生 (label, sample_id, audio_path) =====
+# =====================================================================
+# Scan audio directory
+# =====================================================================
+
 def iter_audio_files(data_root: Path) -> Iterable[Tuple[str, str, str]]:
-    """Yield (label, sample_id, audio_path) for all audio files under data_root/AD,HC,MCI."""
+    """Yield (label, sample_id, audio_path) under data_root/AD,HC,MCI."""
     for label, subdir in LABEL_DIRS.items():
         audio_dir = data_root / subdir
         if not audio_dir.is_dir():
-            print(f"[WARN] 資料夾不存在，略過：{audio_dir}")
+            print(f"[WARN] Missing directory, skip: {audio_dir}")
             continue
 
         for path in sorted(audio_dir.iterdir()):
@@ -72,13 +75,15 @@ def iter_audio_files(data_root: Path) -> Iterable[Tuple[str, str, str]]:
             sample_id = f"{label}_{path.stem}"
             yield label, sample_id, str(path)
 
-# ===== Whisper decode 參數：完全由 YAML 驅動 =====
-def build_decode_kwargs(asr_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Construct Whisper decoding kwargs from the ``asr.decode`` config block.
+# =====================================================================
+# Build decode kwargs from YAML
+# =====================================================================
 
-    All beam-search / temperature / threshold hyperparameters are expected
-    to live in the YAML config, not in code, to keep the paper-style
-    experimental setup explicit and reproducible.
+def build_decode_kwargs(asr_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Construct Whisper decoding kwargs from ``asr.decode`` config block.
+
+    All beam-search / temperature / threshold hyper-parameters live in YAML
+    to keep experiments explicit and reproducible.
 
     Raises
     ------
@@ -87,11 +92,17 @@ def build_decode_kwargs(asr_cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     decode_cfg = asr_cfg.get("decode")
     if decode_cfg is None:
-        raise KeyError("Config 檔缺少 'asr.decode' 區塊，請在 config_text.yaml 中加入。")
-    # 回傳一份獨立 dict，避免之後被就地修改
+        raise KeyError(
+            "Config 檔缺少 'asr.decode' 區塊，"
+            "請在 config_text.yaml 中加入 Whisper 解碼參數。"
+        )
+    # Return a shallow copy to avoid accidental in-place modification
     return dict(decode_cfg)
 
-# ===== 核心流程：給 notebook / script 呼叫 =====
+# =====================================================================
+# Core ASR pipeline
+# =====================================================================
+
 def run_ncmmsc_asr(config_path: Optional[str] = None) -> None:
     """Run the NCMMSC ASR pipeline (audio → Whisper → CSV).
 
@@ -101,7 +112,7 @@ def run_ncmmsc_asr(config_path: Optional[str] = None) -> None:
         Path to ``config_text.yaml``.
         If None, :func:`config_utils.load_text_config` will use its default.
     """
-    # 讀設定檔（只讀一次）
+    # Load ASR config once
     asr_cfg = get_asr_config(path=config_path)
 
     data_root = Path(asr_cfg["data_root"])
@@ -111,27 +122,30 @@ def run_ncmmsc_asr(config_path: Optional[str] = None) -> None:
     compute_type = asr_cfg["compute_type"]
     initial_prompt = asr_cfg["initial_prompt"]
 
-    # 載入 Whisper 模型
+    # Load Whisper model
     print(f"[INFO] Loading Whisper model: {model_size} on {device} ({compute_type})")
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-    # 收集所有音檔
+    # Collect audio files
     files = list(iter_audio_files(data_root))
     total_files = len(files)
     print(f"[INFO] Found {total_files} audio files under {data_root}")
 
-    #  Decode 參數（完全由 YAML 驅動）
+    # Decode settings (fully YAML-driven)
     decode_kwargs = build_decode_kwargs(asr_cfg)
-    # 保證 initial_prompt 一定有帶進去
     decode_kwargs["initial_prompt"] = initial_prompt
 
     ok_count = 0
     err_count = 0
 
-    #  寫出 CSV（由 asr_io 處理 schema + 清理）
+    # Open CSV writer (schema + light cleaning handled in asr_io)
     fp, writer = open_asr_csv_writer(output_csv)
     try:
-        iterable = tqdm(files, desc="Transcribing", unit="file", leave=True) if HAS_TQDM else files
+        iterable = (
+            tqdm(files, desc="Transcribing", unit="file", leave=True)
+            if HAS_TQDM
+            else files
+        )
 
         for label, sample_id, audio_path in iterable:
             if HAS_TQDM:
@@ -141,17 +155,19 @@ def run_ncmmsc_asr(config_path: Optional[str] = None) -> None:
 
             try:
                 segments, info = model.transcribe(audio_path, **decode_kwargs)
-                raw_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
+                raw_text = " ".join(
+                    seg.text.strip()
+                    for seg in segments
+                    if seg.text.strip()
+                )
                 duration = getattr(info, "duration", 0.0)
-
                 ok_count += 1
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 print(f"[ERROR] 無法轉錄 {audio_path}: {e}")
                 raw_text = ""
                 duration = 0.0
                 err_count += 1
 
-            # 寫入 CSV：清理 + 欄位 mapping 都在 asr_io 裡做
             write_asr_row_with_cleaning(
                 writer,
                 sample_id=sample_id,
@@ -168,11 +184,24 @@ def run_ncmmsc_asr(config_path: Optional[str] = None) -> None:
         f"(ok={ok_count}, error={err_count})"
     )
 
-# ===== 極簡 CLI：只允許指定 config 檔 =====
+# =====================================================================
+# CLI entry point
+# =====================================================================
+
 def build_arg_parser() -> argparse.ArgumentParser:
-    """極簡 CLI：只讓你指定 config 檔路徑，其餘全部交給 YAML 管理。"""
-    parser = argparse.ArgumentParser(description="Run Whisper ASR on NCMMSC audio and export CSV (config-driven).")
-    parser.add_argument("--config",type=str,default=None,help="config_text.yaml 路徑（預設使用專案根目錄的 config_text.yaml）",)
+    """Build CLI argument parser for ASR script."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run Whisper ASR on NCMMSC audio and export CSV "
+            "(paths & hyper-parameters from config_text.yaml)."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to config_text.yaml（預設：專案根目錄的 config_text.yaml）",
+    )
     return parser
 
 def cli_main() -> None:
