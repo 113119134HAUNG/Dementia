@@ -21,25 +21,30 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 
-from config_utils import load_text_config, get_text_config, get_features_config
+from tools.config_utils import load_text_config, get_text_config, get_features_config
 
-from cv_utils import require, get_dict, norm_str_list, ensure_parent
-from cv_dataset import load_cleaned_dataset
-from cv_folds import build_folds_indices, save_folds_indices, load_folds_indices
-from cv_features import (
+from paper.cv_utils import require, get_dict, norm_str_list, ensure_parent
+from paper.cv_dataset import load_cleaned_dataset
+from paper.cv_folds import build_folds_indices, save_folds_indices, load_folds_indices
+from paper.cv_features import (
     tfidf_features_all,
-    tfidf_features_fold_fit,
     bert_embeddings_all,
     glove_embeddings_all,
     gemma_embeddings_all,
 )
-from cv_eval import build_logreg, evaluate_with_precomputed_folds
+from paper.cv_eval import (
+    evaluate_with_precomputed_folds,
+    evaluate_tfidf_trainonly,  # 需要你在 cv_eval.py 補上（我下面有給）
+)
 
-
-def run_evaluate_cv(config_path: Optional[str] = None, *, methods_override: Optional[List[str]] = None, reuse_folds: bool = False) -> str:
+def run_evaluate_cv(
+    config_path: Optional[str] = None,
+    *,
+    methods_override: Optional[List[str]] = None,
+    reuse_folds: bool = False,
+) -> str:
     cfg = load_text_config(config_path)
     text_cfg = get_text_config(cfg=cfg)
     feat_cfg = get_features_config(cfg=cfg)
@@ -50,6 +55,7 @@ def run_evaluate_cv(config_path: Optional[str] = None, *, methods_override: Opti
         print("[INFO] features.crossval.enabled=false -> skip evaluate_cv.")
         return ""
 
+    # dataset (already cleaned)
     cleaned_jsonl = Path(str(require(text_cfg, "cleaned_jsonl", where="text")))
     data = load_cleaned_dataset(cleaned_jsonl)
     X_text = data.X
@@ -78,7 +84,7 @@ def run_evaluate_cv(config_path: Optional[str] = None, *, methods_override: Opti
     if (vc < n_splits).any():
         raise ValueError(f"Not enough samples per class for {n_splits}-fold CV. Counts:\n{vc}")
 
-    # folds
+    # folds (save once, reuse across methods)
     if reuse_folds:
         folds = load_folds_indices(output_indices)
         print(f"[INFO] Reusing folds from: {output_indices} (n_folds={len(folds)})")
@@ -87,12 +93,11 @@ def run_evaluate_cv(config_path: Optional[str] = None, *, methods_override: Opti
         save_folds_indices(folds, output_path=output_indices)
         print(f"[INFO] Saved fold indices to: {output_indices} (n_folds={len(folds)})")
 
-    # batching knobs
+    # knobs
     default_bs = int(cv_cfg.get("batch_size", 8))
     bert_bs = int(cv_cfg.get("bert_batch_size", default_bs))
     gemma_bs = int(cv_cfg.get("gemma_batch_size", default_bs))
 
-    # tfidf fit scope
     tfidf_fit_scope = str(cv_cfg.get("tfidf_fit_scope", "full")).strip().lower()
     if tfidf_fit_scope not in ("full", "train"):
         raise ValueError("features.crossval.tfidf_fit_scope must be 'full' or 'train'.")
@@ -116,7 +121,6 @@ def run_evaluate_cv(config_path: Optional[str] = None, *, methods_override: Opti
         "methods": {},
     }
 
-    # run each method with the SAME folds
     for method in methods:
         m = str(method).strip().lower()
         if not m:
@@ -141,64 +145,21 @@ def run_evaluate_cv(config_path: Optional[str] = None, *, methods_override: Opti
                     method_name="tfidf",
                 )
             else:
-                # train-only fitting per fold
-                fold_rows: List[Dict[str, Any]] = []
-                cms: List[List[List[int]]] = []
-                clf_template = build_logreg(logreg_cfg)
-
-                for fold_i, (tr, te) in enumerate(folds, start=1):
-                    Xtr_txt = [X_text[i] for i in tr.tolist()]
-                    Xte_txt = [X_text[i] for i in te.tolist()]
-                    Xtr, Xte = tfidf_features_fold_fit(
-                        Xtr_txt, Xte_txt,
-                        vectorizer_cfg=vect_cfg,
-                        transformer_cfg=trf_cfg,
-                    )
-                    ytr, yte = y[tr], y[te]
-
-                    clf = type(clf_template)(**clf_template.get_params())
-                    clf.fit(Xtr, ytr)
-                    ypred = clf.predict(Xte)
-
-                    acc = float(metrics.accuracy_score(yte, ypred))
-                    prec = float(metrics.precision_score(yte, ypred, average=average, zero_division=zero_division))
-                    rec = float(metrics.recall_score(yte, ypred, average=average, zero_division=zero_division))
-                    f1 = float(metrics.f1_score(yte, ypred, average=average, zero_division=zero_division))
-
-                    fold_rows.append(
-                        {"fold": fold_i, "accuracy": acc, "precision": prec, "recall": rec, "f1": f1,
-                         "n_train": int(len(tr)), "n_test": int(len(te))}
-                    )
-
-                    if print_report:
-                        print(f"\nFold {fold_i} (tfidf):")
-                        print(metrics.classification_report(yte, ypred, target_names=label_names, zero_division=zero_division))
-
-                    if print_cm:
-                        cm = metrics.confusion_matrix(yte, ypred, labels=[0, 1]).astype(int).tolist()
-                        cms.append(cm)
-                        print(f"[Confusion Matrix] Fold {fold_i} (tfidf) labels={label_names}: {cm}")
-
-                arr_acc = np.array([r["accuracy"] for r in fold_rows], dtype=np.float64)
-                arr_prec = np.array([r["precision"] for r in fold_rows], dtype=np.float64)
-                arr_rec = np.array([r["recall"] for r in fold_rows], dtype=np.float64)
-                arr_f1 = np.array([r["f1"] for r in fold_rows], dtype=np.float64)
-
-                res = {
-                    "method": "tfidf",
-                    "fold_metrics": fold_rows,
-                    "summary": {
-                        "accuracy_mean": float(arr_acc.mean()),
-                        "accuracy_std": float(arr_acc.std()),
-                        "precision_mean": float(arr_prec.mean()),
-                        "precision_std": float(arr_prec.std()),
-                        "recall_mean": float(arr_rec.mean()),
-                        "recall_std": float(arr_rec.std()),
-                        "f1_mean": float(arr_f1.mean()),
-                        "f1_std": float(arr_f1.std()),
-                    },
-                    "confusion_matrices": cms if print_cm else [],
-                }
+                # train-only fitting per fold (moved to cv_eval to keep evaluate_cv clean)
+                res = evaluate_tfidf_trainonly(
+                    X_text=X_text,
+                    y=y,
+                    folds=folds,
+                    vectorizer_cfg=vect_cfg,
+                    transformer_cfg=trf_cfg,
+                    logreg_cfg=logreg_cfg,
+                    average=average,
+                    zero_division=zero_division,
+                    print_report=print_report,
+                    print_cm=print_cm,
+                    label_names=label_names,
+                    method_name="tfidf",
+                )
 
             results["methods"]["tfidf"] = res
 
