@@ -15,12 +15,13 @@ Steps
        - (optional) TAUKADIAL Chinese subset
 3. Normalize diagnosis labels + remove English rows
 4. Structural text cleaning (Doctor:/%mor/ annotations, etc.)
-5. Length-based outlier filtering (per Diagnosis: mean ± std)
-6. Stratified train/test split → JSONL
+5. Subset selection (dataset/labels/balancing) – YAML default, CLI override supported
+6. Length-based outlier filtering (per Diagnosis: mean ± std)
+7. Stratified train/test split → JSONL
 
 Configuration (single source of truth)
 --------------------------------------
-All paths come from ``config_text.yaml``:
+All paths come from `config_text.yaml`:
 
 - asr:
     - output_csv   : NCMMSC ASR CSV (input of step 1)
@@ -37,7 +38,7 @@ All paths come from ``config_text.yaml``:
 
 import argparse
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -132,12 +133,12 @@ def combine_jsonls(
     return str(merged_path)
 
 # =====================================================================
-# 4. Load + clean + length filtering
+# 4. Load + clean + subset + length filtering
 # =====================================================================
 
-def load_and_clean_chinese(merged_jsonl_path: str) -> pd.DataFrame:
+def load_and_clean_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -> pd.DataFrame:
     """Load merged JSONL and apply label normalization, language filtering,
-    structural text cleaning, and length-based outlier removal.
+    structural text cleaning, subset selection, and length-based outlier removal.
     """
     merged_jsonl_path = Path(merged_jsonl_path)
     df = pd.read_json(merged_jsonl_path, lines=True)
@@ -170,7 +171,12 @@ def load_and_clean_chinese(merged_jsonl_path: str) -> pd.DataFrame:
         clean_structured_chinese
     )
 
-    # Length stats and filtering
+    # Subset selection (config-driven; CLI may override text_cfg)
+    df = apply_subset(df, text_cfg)
+    print(f"[INFO] After subset: {len(df)} samples remaining.")
+    print("[INFO] Label distribution after subset:\n", df["Diagnosis"].value_counts())
+
+    # Length stats and filtering (computed AFTER subset)
     df["length"] = df["Text_interviewer_participant"].apply(len)
     length_stats = df.groupby("Diagnosis")["length"].agg(["min", "max", "mean", "std"])
     print("[INFO] Length stats by Diagnosis:\n", length_stats)
@@ -219,19 +225,29 @@ def split_and_save(
 def run_chinese_preprocessing(
     config_path: Optional[str] = None,
     skip_asr: bool = False,
+    *,
+    target_datasets: Optional[List[str]] = None,
+    target_labels: Optional[List[str]] = None,
+    balance: Optional[bool] = None,
+    subset_seed: Optional[int] = None,
+    cap_per_class: Optional[int] = None,
 ) -> Tuple[str, str]:
-    """End-to-end preprocessing for Chinese AD datasets.
-
-    Parameters
-    ----------
-    config_path : str or None
-        Path to config_text.yaml. If None, the default is used.
-    skip_asr : bool
-        If True, skip CSV→JSONL step and reuse existing NCMMSC JSONL.
-    """
+    """End-to-end preprocessing for Chinese AD datasets."""
     # Load config blocks
     asr_cfg = get_asr_config(path=config_path)
     text_cfg = get_text_config(path=config_path)
+
+    # CLI overrides (in-memory only; keep YAML as the source)
+    if target_datasets is not None:
+        text_cfg["target_datasets"] = target_datasets
+    if target_labels is not None:
+        text_cfg["target_labels"] = target_labels
+    if balance is not None:
+        text_cfg["balance"] = balance
+    if subset_seed is not None:
+        text_cfg["subset_seed"] = subset_seed
+    if cap_per_class is not None:
+        text_cfg["cap_per_class"] = cap_per_class
 
     # Step 1: ASR CSV → NCMMSC JSONL
     ncmmsc_jsonl_path = text_cfg["ncmmsc_jsonl"]
@@ -251,8 +267,8 @@ def run_chinese_preprocessing(
         merged_name=text_cfg["combined_name"],
     )
 
-    # Step 3–5: clean + length filtering + split & save
-    df_clean = load_and_clean_chinese(merged_path)
+    # Step 3–7: clean + subset + length filtering + split & save
+    df_clean = load_and_clean_chinese(merged_path, text_cfg)
     return split_and_save(
         df_clean,
         output_dir=text_cfg["output_dir"],
@@ -266,23 +282,17 @@ def run_chinese_preprocessing(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser for Chinese preprocessing."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "Preprocess Chinese AD datasets "
-            "(NCMMSC + Predictive + optional TAUKADIAL) – config-driven."
-        )
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config_text.yaml（預設：專案根目錄的 config_text.yaml）",
-    )
-    parser.add_argument(
-        "--skip-asr",
-        action="store_true",
-        help="Skip ASR CSV→JSONL step and reuse existing NCMMSC JSONL.",
-    )
+    parser = argparse.ArgumentParser(description=("Preprocess Chinese AD datasets ","(NCMMSC + Predictive + optional TAUKADIAL) – config-driven, paper-style CLI."))
+    parser.add_argument("--config",type=str,default=None,help="Path to config_text.yaml（預設：專案根目錄的 config_text.yaml）",)
+    parser.add_argument("--skip-asr",action="store_true",help="Skip ASR CSV→JSONL step and reuse existing NCMMSC JSONL.",)
+    # Subset controls (CLI override; YAML remains source-of-truth by default)
+    parser.add_argument("--target-datasets",nargs="+",default=None,help="Datasets to keep. Example: --target-datasets NCMMSC2021_AD_Competition",)
+    parser.add_argument("--target-labels",nargs="+",default=None,help="Diagnosis labels to keep. Example: --target-labels AD HC",)
+    bal_group = parser.add_mutually_exclusive_group()
+    bal_group.add_argument("--balance",dest="balance",action="store_true",default=None,help="Enable class balancing.",)
+    bal_group.add_argument("--no-balance",dest="balance",action="store_false",default=None,help="Disable class balancing.",)
+    parser.add_argument("--subset-seed",type=int,default=None,help="Random seed for subset/balancing.",)
+    parser.add_argument("--cap-per-class",type=int,default=None,help="Optional cap per class for quick runs.",)
     return parser
 
 def cli_main() -> None:
@@ -291,6 +301,11 @@ def cli_main() -> None:
     run_chinese_preprocessing(
         config_path=args.config,
         skip_asr=args.skip_asr,
+        target_datasets=args.target_datasets,
+        target_labels=args.target_labels,
+        balance=args.balance,
+        subset_seed=args.subset_seed,
+        cap_per_class=args.cap_per_class,
     )
 
 if __name__ == "__main__":
