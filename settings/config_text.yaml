@@ -88,8 +88,13 @@ text:
 
   output_dir: "/content/chinese_combined"
   combined_name: "Chinese_Combined.jsonl"
+
+  # kept for backward compatibility (preprocess_chinese no longer must use these)
   train_jsonl: "train_chinese.jsonl"
   test_jsonl: "test_chinese.jsonl"
+
+  # NEW: cleaned output (evaluate_cv reads this)
+  cleaned_jsonl: "/content/chinese_combined/cleaned.jsonl"
 
   # Merge candidates (ONLY this list is used to merge)
   corpora:
@@ -134,7 +139,7 @@ text:
     enabled: true
     std_k: *length_std_k
 
-  # Train/test split (config-driven)
+  # kept (not required by current flow; you can remove later if you want)
   split:
     test_size: *split_test_size
     random_state: *seed
@@ -142,7 +147,7 @@ text:
     min_per_class: *min_per_class
 
 # ---------------------------------------------------------------------
-# Features (unchanged)
+# Features (YAML-driven for evaluate_cv)
 # ---------------------------------------------------------------------
 features:
   method: "bert"
@@ -209,8 +214,26 @@ features:
 
   crossval:
     enabled: true
+
+    # folds config (paper-aligned: save once, reuse across methods)
     n_splits: 5
     stratified: true
     shuffle: true
     random_state: *seed
+    output_indices: "/content/chinese_combined/folds_indices.json"
+
+    # metrics config
     metrics_average: "macro"
+    zero_division: 0
+    metrics_output: "/content/chinese_combined/cv_metrics.json"
+
+    # methods to run (order matters)
+    methods: ["tfidf", "bert", "glove", "gemma"]
+
+    # paper snippet behavior: TF-IDF fit on full data then slice folds
+    # use "train" if you want strict per-fold train-only fitting
+    tfidf_fit_scope: "full"   # "full" | "train"
+
+    # printing toggles
+    print_classification_report: true
+    print_confusion_matrix: true
