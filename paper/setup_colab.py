@@ -3,7 +3,7 @@
 setup_colab.py
 
 One-shot Colab setup script:
-- optional pip install
+- optional pip install (Colab-safe by default; avoids upgrading core libs)
 - download + unzip dataset zip (Google Drive)
 - clone repo
 - download fastText Chinese vectors (.vec)
@@ -32,24 +32,62 @@ def run(cmd: List[str], *, quiet: bool = False) -> None:
         print("\n$ " + " ".join(cmd))
     subprocess.run(cmd, check=True)
 
+
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
+
+def in_colab() -> bool:
+    return "COLAB_GPU" in os.environ or "COLAB_RELEASE_TAG" in os.environ
+
 # -----------------------------
-# Install deps
+# Install deps (Colab-safe)
 # -----------------------------
-def install_deps(*, quiet: bool = True) -> None:
+def install_deps(
+    *,
+    quiet: bool = True,
+    upgrade: bool = False,
+    install_core: bool = False,
+    install_torch: bool = False,
+) -> None:
+    """
+    Colab-safe install:
+    - default: DO NOT touch numpy/pandas/torch (avoid conflicts with colab/opencv/tf/torchvision)
+    - optional flags to include them if you really need.
+    """
+    # packages that are usually safe to install on Colab without breaking preinstalls
     pkgs = [
-        "numpy", "pandas", "scikit-learn",
+        "scikit-learn",
         "jieba",
-        "transformers", "accelerate", "sentencepiece",
-        "huggingface_hub", "hf_transfer",
-        "torch", "faster-whisper",
+        "transformers",
+        "accelerate",
+        "sentencepiece",
+        "huggingface_hub",
+        "hf_transfer",
+        "faster-whisper",
         "gdown",
     ]
-    cmd = [sys.executable, "-m", "pip", "install", "-U"] + pkgs
+
+    # Only install/upgrade these when explicitly asked.
+    # On Colab, upgrading them often causes conflicts with preinstalled opencv/tf/torchvision/torchaudio.
+    if install_core:
+        pkgs = ["numpy", "pandas"] + pkgs
+    if install_torch:
+        pkgs = ["torch"] + pkgs
+
+    cmd: List[str] = [sys.executable, "-m", "pip", "install"]
     if quiet:
-        cmd.insert(4, "-q")  # after "install"
+        cmd.append("-q")
+    if upgrade:
+        cmd += ["-U", "--upgrade-strategy", "only-if-needed"]
+    cmd += pkgs
+
+    if in_colab() and (upgrade or install_core or install_torch):
+        print(
+            "[WARN] You enabled upgrades/core installs. On Colab this can cause dependency conflicts.\n"
+            "       If you see numpy/pandas/torch conflicts, consider restarting runtime and running without these flags."
+        )
+
     run(cmd, quiet=quiet)
 
 # -----------------------------
@@ -88,6 +126,7 @@ def unzip_file(zip_path: Path, *, out_dir: Path) -> None:
         return
 
     import zipfile
+
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(path=str(out_dir))
 
@@ -126,11 +165,14 @@ def download_fasttext_vec(*, url: str, out_vec_path: Path) -> Path:
     except Exception:
         pass
 
-    print(f"[OK] fastText ready: {out_vec_path}  (size={out_vec_path.stat().st_size/1024/1024:.1f} MB)")
+    print(
+        f"[OK] fastText ready: {out_vec_path}  "
+        f"(size={out_vec_path.stat().st_size/1024/1024:.1f} MB)"
+    )
     return out_vec_path
 
 # -----------------------------
-# HF login + model download
+# HF login + model download (robust)
 # -----------------------------
 def hf_login_and_download(
     *,
@@ -139,6 +181,7 @@ def hf_login_and_download(
     hf_token: Optional[str],
     interactive: bool,
 ) -> List[Path]:
+    # Use /content caches for Colab (faster / avoids filling home)
     os.environ.setdefault("HF_HOME", "/content/hf")
     os.environ.setdefault("TRANSFORMERS_CACHE", "/content/hf/transformers")
     os.environ.setdefault("HF_HUB_CACHE", "/content/hf/hub")
@@ -150,37 +193,71 @@ def hf_login_and_download(
     except Exception as e:
         raise ImportError("huggingface_hub is required. Run with --install first.") from e
 
-    token = (hf_token or os.environ.get("HF_TOKEN", "")).strip()
-    if not token and interactive:
-        from getpass import getpass
-        token = getpass("Paste your Hugging Face token (hidden): ").strip()
+    def try_whoami(tok: str) -> Optional[str]:
+        try:
+            who = HfApi(token=tok).whoami()
+            return who.get("name") or who.get("email") or "unknown"
+        except Exception:
+            return None
 
-    if token:
+    # Priority: --hf-token > env HF_TOKEN > prompt (if interactive)
+    token = (hf_token or os.environ.get("HF_TOKEN", "")).strip()
+
+    who = try_whoami(token) if token else None
+    if token and not who:
+        print(
+            "[WARN] HF token seems invalid.\n"
+            "       If you set HF_TOKEN in Colab Secrets (🔑), update/remove it.\n"
+            "       We'll prompt for a new token if interactive mode is enabled."
+        )
+        if interactive:
+            from getpass import getpass
+
+            token = getpass("Paste your Hugging Face token (hidden): ").strip()
+            who = try_whoami(token) if token else None
+
+    if token and who:
+        # Ensure THIS process uses the valid token (overrides injected env values)
+        os.environ["HF_TOKEN"] = token
         login(token=token)
-        who = HfApi().whoami()
-        print("[OK] HF login:", who.get("name") or who.get("email") or "unknown")
+        print("[OK] HF login:", who)
     else:
-        print("[WARN] No HF token provided. Public models may still download; gated models may fail.")
+        print("[WARN] No valid HF token. Public models may still download; gated models will fail.")
+        token = ""  # normalize
 
     ensure_dir(models_dir)
     local_paths: List[Path] = []
 
     for repo_id in models:
+        repo_id = str(repo_id).strip()
+        if not repo_id:
+            continue
+
         subdir = repo_id.replace("/", "__")
         local_dir = models_dir / subdir
         ensure_dir(local_dir)
+
+        # If already has any file, assume it was downloaded previously and skip
+        try:
+            if any(local_dir.iterdir()):
+                print(f"[INFO] Model exists, skip: {repo_id} -> {local_dir}")
+                local_paths.append(local_dir)
+                continue
+        except Exception:
+            pass
 
         print(f"[INFO] Downloading model snapshot: {repo_id} -> {local_dir}")
         try:
             snapshot_download(
                 repo_id=repo_id,
                 local_dir=str(local_dir),
-                local_dir_use_symlinks=False,
+                token=(token or None),
+                local_dir_use_symlinks=False,  # kept for backward compat; harmless if ignored
             )
             local_paths.append(local_dir)
             print(f"[OK] {repo_id} -> {local_dir}")
         except Exception as e:
-            print(f"[WARN] Failed: {repo_id}  (common: gated model / not accepted license)")
+            print(f"[WARN] Failed: {repo_id}  (common: gated model / license not accepted / no permission)")
             print(f"       Error: {repr(e)}")
 
     return local_paths
@@ -192,13 +269,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Colab one-shot setup (paper-style, argparse-managed).")
 
     # toggles
-    p.add_argument("--install", action="store_true", help="Install dependencies via pip.")
+    p.add_argument("--install", action="store_true", help="Install dependencies via pip (Colab-safe defaults).")
     p.add_argument("--download-data", action="store_true", help="Download dataset zip from Google Drive.")
     p.add_argument("--unzip-data", action="store_true", help="Unzip dataset zip.")
     p.add_argument("--clone-repo", action="store_true", help="Clone repo (no-op if already exists).")
     p.add_argument("--download-vec", action="store_true", help="Download + gunzip fastText cc.zh.300.vec.")
     p.add_argument("--hf", action="store_true", help="Hugging Face login + pre-download models.")
     p.add_argument("--all", action="store_true", help="Run all steps above.")
+
+    # install behavior
+    p.add_argument("--upgrade", action="store_true", help="pip install -U (NOT recommended on Colab unless needed).")
+    p.add_argument(
+        "--install-core",
+        action="store_true",
+        help="Also install/upgrade numpy+pandas (may cause Colab conflicts).",
+    )
+    p.add_argument(
+        "--install-torch",
+        action="store_true",
+        help="Also install/upgrade torch (may break torchvision/torchaudio on Colab).",
+    )
 
     # params
     p.add_argument("--gdrive-file-id", type=str, default="13fAo7D8p7rm1GKKEFAnmGL_qVFnFS6fP")
@@ -223,7 +313,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="HF repo ids to download. Example: --models bert-base-chinese google/gemma-2b",
     )
 
-    p.add_argument("--hf-token", type=str, default=None, help="HF token (prefer env HF_TOKEN instead).")
+    p.add_argument("--hf-token", type=str, default=None, help="HF token (prefer env HF_TOKEN or Secrets).")
     p.add_argument("--no-interactive", action="store_true", help="Do not prompt for HF token; use env/arg only.")
     return p
 
@@ -242,7 +332,12 @@ def cli_main() -> None:
     unzip_dir = Path(args.unzip_dir)
 
     if do_install:
-        install_deps(quiet=True)
+        install_deps(
+            quiet=True,
+            upgrade=bool(args.upgrade),
+            install_core=bool(args.install_core),
+            install_torch=bool(args.install_torch),
+        )
 
     if do_dl:
         gdrive_download(file_id=str(args.gdrive_file_id).strip(), output_path=zip_path)
