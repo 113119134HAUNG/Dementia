@@ -43,8 +43,9 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from collection import JSONLCombiner
-from config_utils import get_asr_config, get_text_config
+from dataset_subset import apply_subset
 from text_cleaning import clean_structured_chinese
+from config_utils import get_asr_config, get_text_config
 
 # =====================================================================
 # ASR CSV → NCMMSC JSONL
