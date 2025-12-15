@@ -4,26 +4,16 @@ text_cleaning.py
 
 Text cleaning utilities (paper-aligned, strict + minimal).
 
-1) ASR-level cleaning (clean_asr_chinese):
-   - Normalize Zhuyin sequences → "嗯"
-   - Remove [聽不清楚]
-   - Compress whitespace
-
-2) Structured transcript cleaning (clean_structured_chinese):
-   - Remove speaker labels and most CHAT-style annotations
-   - Keep key disfluency / repair markers (paper-aligned):
-       &-uh / &-um (filled pauses)          -> keep as &-uh style
-       [//]        (self-repair / retrace)  -> keep
-       [/]         (repetition)             -> keep
-       < . . . >   (pause)                  -> normalize to <...>
-       [+ gram]    (gram marker)            -> normalize to [+ gram]
-
-3) No-punct variant (clean_structured_chinese_no_punct):
-   - Convert kept markers to alphabetic tokens then strip punctuation/symbols
+- Keep ONLY:
+  &-uh / &-um, [//], [/], <...>, [+ gram]
+- Collapse consecutive duplicates of: <...>, [+ gram], &-uh/&-um
+  (do NOT collapse [//] or [/])
 """
 
 from __future__ import annotations
 
+import math
+import numbers
 import re
 from typing import Union
 
@@ -33,8 +23,16 @@ TextLike = Union[str, float]
 # Small helpers (no extra deps)
 # =====================================================================
 def _is_missing(x: TextLike) -> bool:
-    # Treat None / float NaN as missing. (Pandas reads CSV missing as float NaN)
-    return x is None or (isinstance(x, float) and x != x)  # NaN != NaN
+    if x is None:
+        return True
+    if isinstance(x, str):
+        return False
+    if isinstance(x, numbers.Real):
+        try:
+            return math.isnan(float(x))
+        except (TypeError, ValueError):
+            return False
+    return False
 
 
 def _to_str(x: TextLike) -> str:
@@ -43,6 +41,7 @@ def _to_str(x: TextLike) -> str:
 # =====================================================================
 # Shared regex
 # =====================================================================
+
 WS_PATTERN = re.compile(r"\s+")
 BRACKET_ANY_PATTERN = re.compile(r"\[[^\]]*\]")
 
@@ -55,15 +54,12 @@ ZHUYIN_PATTERN = re.compile(
     r"ㄧㄨㄩ"
     r"ㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ]+"
 )
-
 MULTI_HMM_PATTERN = re.compile(r"(嗯[\s、，,.!?]*){2,}")
 
 def clean_asr_chinese(text: TextLike) -> str:
-    """Light cleaning for Chinese ASR output."""
     t = _to_str(text)
     if not t:
         return ""
-
     t = t.replace("[聽不清楚]", " ")
     t = ZHUYIN_PATTERN.sub("嗯", t)
     t = MULTI_HMM_PATTERN.sub("嗯 ", t)
@@ -71,10 +67,14 @@ def clean_asr_chinese(text: TextLike) -> str:
     return t
 
 # =====================================================================
-# Structured transcript cleaning (paper-aligned)
+# Structured transcript cleaning (paper-aligned, strict)
 # =====================================================================
 PAUSE_PATTERN = re.compile(r"<\s*(?:\.\s*){3,}>")  # < . . . > -> <...>
 GRAM_PATTERN = re.compile(r"\[\+\s*gram\s*\]", flags=re.IGNORECASE)  # -> [+ gram]
+
+# Normalize retrace/repeat variants (allow spaces inside)
+RETRACE_PATTERN = re.compile(r"\[\s*//\s*\]")
+REPEAT_PATTERN = re.compile(r"\[\s*/\s*\]")
 
 KEEP_BRACKET_MARKERS = {"[//]", "[/]", "[+ gram]"}
 
@@ -86,8 +86,10 @@ TIME_CODE_PATTERN = re.compile(r"\d+_\d+")
 MOR_PAR_PATTERN = re.compile(r"(%\w+|\*[A-Z]+):")
 POS_TAG_PATTERN = re.compile(r"\b\w+:\w+\|\w+")
 
-FILLPAUSE_PATTERN = re.compile(r"(?i)&-([a-z]+)")                 # keep only &-letters
-DROP_AMP_CODES_PATTERN = re.compile(r"&(?!(?:-[A-Za-z]+))\S+")    # drop other &codes
+# STRICT: keep ONLY these filled pauses
+ALLOWED_FILLPAUSES = {"uh", "um"}
+FILLPAUSE_PATTERN = re.compile(r"(?i)&-([a-z]+)")
+DROP_AMP_CODES_PATTERN = re.compile(r"&(?!(?:-[A-Za-z]+))\S+")
 
 DROP_PLUS_ANGLE_PATTERN = re.compile(r"\+<[^>]*>")
 DROP_PLUS_CODE_PATTERN = re.compile(r"\+[^ ]+")
@@ -95,13 +97,27 @@ DROP_PLUS_CODE_PATTERN = re.compile(r"\+[^ ]+")
 PAREN_PATTERN = re.compile(r"\([^)]*\)")
 DROP_ANGLE_EXCEPT_PAUSE_PATTERN = re.compile(r"<(?!\.\.\.>)[^>]*>")  # keep literal <...>
 
+# appropriate: collapse consecutive duplicates (only these)
+DUP_PAUSE_PATTERN = re.compile(r"(<\.\.\.>)(?:\s+\1)+")
+DUP_GRAM_PATTERN = re.compile(r"(\[\+\s*gram\])(?:\s+\1)+", flags=re.IGNORECASE)
+DUP_FILLPAUSE_PATTERN = re.compile(r"(&-(?:uh|um))(?:\s+\1)+", flags=re.IGNORECASE)
+
+def _keep_allowed_fillpause(m: re.Match) -> str:
+    w = m.group(1).lower()
+    return f" &-{w} " if w in ALLOWED_FILLPAUSES else " "
+
+def _collapse_marker_dups(t: str) -> str:
+    t = DUP_PAUSE_PATTERN.sub(r"\1", t)
+    t = DUP_GRAM_PATTERN.sub("[+ gram]", t)
+    t = DUP_FILLPAUSE_PATTERN.sub(lambda m: m.group(1).lower(), t)
+    return t
+
 def clean_structured_chinese(text: TextLike) -> str:
-    """Remove speaker tags and most CHAT annotations, while keeping key markers."""
     t = _to_str(text)
     if not t:
         return ""
 
-    t = t.replace("\u00A0", " ")  # NBSP -> space
+    t = t.replace("\u00A0", " ")
 
     # Speaker labels
     t = SPEAKER_EN_PATTERN.sub("", t)
@@ -113,14 +129,17 @@ def clean_structured_chinese(text: TextLike) -> str:
     t = MOR_PAR_PATTERN.sub("", t)
     t = POS_TAG_PATTERN.sub("", t)
 
-    # Keep / normalize key markers
+    # Normalize key markers first
     t = PAUSE_PATTERN.sub(" <...> ", t)
     t = GRAM_PATTERN.sub(" [+ gram] ", t)
-    t = t.replace("[//]", " [//] ")
-    t = t.replace("[/]", " [/] ")
-    t = FILLPAUSE_PATTERN.sub(r" &-\1 ", t)
 
-    # Remove other [...] but keep the 3 markers above
+    t = RETRACE_PATTERN.sub(" [//] ", t)
+    t = REPEAT_PATTERN.sub(" [/] ", t)
+
+    # Filled pauses: keep only uh/um
+    t = FILLPAUSE_PATTERN.sub(_keep_allowed_fillpause, t)
+
+    # Remove other [...] but keep the 3 markers
     def _drop_other_brackets(m: re.Match) -> str:
         s = m.group(0)
         s_norm = WS_PATTERN.sub(" ", s.strip())
@@ -141,10 +160,12 @@ def clean_structured_chinese(text: TextLike) -> str:
     t = DROP_PLUS_ANGLE_PATTERN.sub(" ", t)
     t = DROP_PLUS_CODE_PATTERN.sub(" ", t)
 
-    # Remove &codes except &-word
+    # Remove &codes except &-word (we already normalized/dropped &-*)
     t = DROP_AMP_CODES_PATTERN.sub(" ", t)
 
-    # Final whitespace
+    # Final whitespace + appropriate collapse
+    t = WS_PATTERN.sub(" ", t).strip()
+    t = _collapse_marker_dups(t)
     t = WS_PATTERN.sub(" ", t).strip()
     return t
 
@@ -154,25 +175,35 @@ def clean_structured_chinese(text: TextLike) -> str:
 PUNCT_PATTERN = re.compile(r"[，。、「」『』？！：；（）《》〈〉——…,.!?;:()\"“”'\-]")
 KEEP_BASIC_CHARS_PATTERN = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9_\s]")
 
-def clean_structured_chinese_no_punct(text: TextLike) -> str:
-    """Structured cleaning + punctuation removal.
+DUP_PAUSE_TOK_PATTERN = re.compile(r"(PAUSE)(?:\s+\1)+")
+DUP_GRAM_TOK_PATTERN = re.compile(r"(GRAM)(?:\s+\1)+")
+DUP_FILLPAUSE_TOK_PATTERN = re.compile(r"(FILLPAUSE_(?:uh|um))(?:\s+\1)+", flags=re.IGNORECASE)
 
-    Preserve key disfluency info by converting markers to alphabetic tokens
-    before stripping symbols.
-    """
+def _fillpause_to_token(m: re.Match) -> str:
+    w = m.group(1).lower()
+    return f" FILLPAUSE_{w} " if w in ALLOWED_FILLPAUSES else " "
+
+def _collapse_token_dups(t: str) -> str:
+    t = DUP_PAUSE_TOK_PATTERN.sub(r"\1", t)
+    t = DUP_GRAM_TOK_PATTERN.sub(r"\1", t)
+    t = DUP_FILLPAUSE_TOK_PATTERN.sub(lambda m: m.group(1).upper(), t)
+    return t
+
+def clean_structured_chinese_no_punct(text: TextLike) -> str:
     t = clean_structured_chinese(text)
     if not t:
         return ""
 
-    # Convert key markers to tokens
     t = t.replace("[//]", " RETRACE ")
     t = t.replace("[/]", " REPEAT ")
     t = t.replace("[+ gram]", " GRAM ")
     t = t.replace("<...>", " PAUSE ")
-    t = FILLPAUSE_PATTERN.sub(r" FILLPAUSE_\1 ", t)
+    t = FILLPAUSE_PATTERN.sub(_fillpause_to_token, t)
 
-    # Strip punctuation/symbols
     t = PUNCT_PATTERN.sub(" ", t)
     t = KEEP_BASIC_CHARS_PATTERN.sub(" ", t)
+    t = WS_PATTERN.sub(" ", t).strip()
+
+    t = _collapse_token_dups(t)
     t = WS_PATTERN.sub(" ", t).strip()
     return t
