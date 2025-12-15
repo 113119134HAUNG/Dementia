@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-preprocess_predictive.py
+preprocess_predictive.py (paper-strict)
 
-Config-driven preprocessing for the Chinese predictive challenge dataset.
-
-Outputs
--------
-1) Text JSONL (unified schema for downstream text pipeline)
-2) eGeMAPS feature CSV (meta + acoustic features)
-
-Single source of truth
-----------------------
-All paths & optional knobs come from config_text.yaml under `predictive`.
+- Load YAML once.
+- TSV parsing behavior is driven by predictive.tsv:
+    keep_speakers / drop_silence / order_by
+- dataset_name is driven by predictive.dataset_name
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -22,65 +18,51 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from enums import ADType
-from config_utils import get_predictive_config
-
-PREDICTIVE_DATASET_NAME = "Chinese_predictive_challenge"
+from config_utils import load_text_config, get_predictive_config
 
 # =====================================================================
-# Strict config helpers
+# Strict helpers
 # =====================================================================
-def _require(cfg: Dict[str, Any], key: str) -> Any:
+def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
     if key not in cfg:
-        raise KeyError(f"Config missing required key: predictive.{key}")
+        prefix = f"{where}." if where else ""
+        raise KeyError(f"Config missing required key: {prefix}{key}")
     return cfg[key]
 
+def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, Any]:
+    v = _require(cfg, key, where=where)
+    if not isinstance(v, dict):
+        prefix = f"{where}." if where else ""
+        raise ValueError(f"{prefix}{key} must be a dict.")
+    return v
 
-def _get_keep_speakers(pred_cfg: Dict[str, Any]) -> Optional[List[str]]:
-    """Optional config: predictive.keep_speakers (null or list[str])."""
-    if "keep_speakers" not in pred_cfg or pred_cfg.get("keep_speakers") is None:
+def _norm_str_list(x: Any) -> Optional[List[str]]:
+    if x is None:
         return None
-
-    v = pred_cfg.get("keep_speakers")
-    if isinstance(v, (list, tuple)):
-        out = [str(x).strip() for x in v if str(x).strip()]
+    if isinstance(x, (list, tuple)):
+        out = [str(i).strip() for i in x if str(i).strip()]
         return out or None
-    s = str(v).strip()
+    s = str(x).strip()
     return [s] if s else None
 
 # =====================================================================
-# Small utils (uuid normalize + dedup) - single point
+# uuid normalize + dedup (single point)
 # =====================================================================
 _INVALID_UUID = {"", "nan", "none", "null"}
 
-
 def _normalize_and_dedup_uuid(df: pd.DataFrame, *, name: str) -> Tuple[pd.DataFrame, Dict[str, int]]:
-    """Normalize uuid and drop duplicated uuids (keep first).
-
-    - uuid -> stripped string
-    - drop invalid uuid: "", "nan", "none", "null" (case-insensitive)
-    - drop duplicate uuid rows (keep first)
-
-    Returns
-    -------
-    (clean_df, stats)
-      stats: {"dropped_invalid": int, "dropped_dups": int}
-    """
-    if df is None or df.empty:
-        return df, {"dropped_invalid": 0, "dropped_dups": 0}
-    if "uuid" not in df.columns:
+    if df is None or df.empty or "uuid" not in df.columns:
         return df, {"dropped_invalid": 0, "dropped_dups": 0}
 
     out = df.copy()
-
-    # Normalize uuid
     uu = out["uuid"].astype(str).str.strip()
     uu_low = uu.str.lower()
+
     valid = ~uu_low.isin(_INVALID_UUID)
     dropped_invalid = int((~valid).sum())
     out = out.loc[valid].copy()
     out["uuid"] = uu.loc[valid].astype(str).str.strip()
 
-    # Dedup
     dup_mask = out["uuid"].duplicated(keep="first")
     dropped_dups = int(dup_mask.sum())
     if dropped_dups > 0:
@@ -89,53 +71,56 @@ def _normalize_and_dedup_uuid(df: pd.DataFrame, *, name: str) -> Tuple[pd.DataFr
     return out.reset_index(drop=True), {"dropped_invalid": dropped_invalid, "dropped_dups": dropped_dups}
 
 # =====================================================================
-# TSV → long-form text
+# TSV -> long-form text (YAML-driven)
 # =====================================================================
-def tsv_to_text(tsv_path: Path, *, keep_speakers: Optional[List[str]] = None) -> str:
-    """Convert a single *.tsv file into one long text string."""
+def tsv_to_text(
+    tsv_path: Path,
+    *,
+    keep_speakers: Optional[List[str]],
+    drop_silence: bool,
+    order_by: Optional[str],
+) -> str:
     df = pd.read_csv(tsv_path, sep="\t", keep_default_na=False)
 
     if "value" not in df.columns:
         raise ValueError(f"TSV file {tsv_path} has no 'value' column.")
 
-    # Optional speaker filter
     if keep_speakers is not None:
         if "speaker" not in df.columns:
             raise ValueError(f"TSV file {tsv_path} has no 'speaker' column.")
-        df = df[df["speaker"].astype(str).str.strip().isin([str(x).strip() for x in keep_speakers])]
+        ks = {str(x).strip() for x in keep_speakers if str(x).strip()}
+        df = df[df["speaker"].astype(str).str.strip().isin(ks)]
 
-    # Prefer stable ordering if possible
-    if "no" in df.columns:
+    if order_by == "no" and "no" in df.columns:
         df["_no"] = pd.to_numeric(df["no"], errors="coerce")
         df = df.sort_values(by="_no", kind="mergesort").drop(columns=["_no"])
-    elif "start_time" in df.columns:
+    elif order_by == "start_time" and "start_time" in df.columns:
         df["_st"] = pd.to_numeric(df["start_time"], errors="coerce")
         df = df.sort_values(by="_st", kind="mergesort").drop(columns=["_st"])
 
     vals = df["value"].astype(str).str.strip()
     vals = vals[vals != ""]
-    vals = vals[vals.str.lower() != "sil"]
+
+    if drop_silence:
+        vals = vals[vals.str.lower() != "sil"]
 
     return " ".join(vals.tolist())
 
 # =====================================================================
-# Text JSONL: meta + TSV → JSONL
+# Build outputs
 # =====================================================================
 def build_text_jsonl(
     meta_df: pd.DataFrame,
     *,
     tsv_root: Path,
     output_jsonl: Path,
+    dataset_name: str,
     keep_speakers: Optional[List[str]],
-    dataset_name: str = PREDICTIVE_DATASET_NAME,
+    drop_silence: bool,
+    order_by: Optional[str],
 ) -> int:
     records: List[dict] = []
-    missing_tsv: List[str] = []
-
-    if "uuid" not in meta_df.columns:
-        raise ValueError("Meta CSV is expected to contain a 'uuid' column.")
-    if "Diagnosis" not in meta_df.columns:
-        raise ValueError("Meta DataFrame is expected to contain 'Diagnosis'.")
+    missing: List[str] = []
 
     for _, row in meta_df.iterrows():
         uid = str(row["uuid"]).strip()
@@ -147,10 +132,15 @@ def build_text_jsonl(
 
         tsv_path = tsv_root / f"{uid}.tsv"
         if not tsv_path.exists():
-            missing_tsv.append(uid)
+            missing.append(uid)
             continue
 
-        text = tsv_to_text(tsv_path, keep_speakers=keep_speakers)
+        text = tsv_to_text(
+            tsv_path,
+            keep_speakers=keep_speakers,
+            drop_silence=drop_silence,
+            order_by=order_by,
+        )
 
         records.append(
             {
@@ -171,28 +161,13 @@ def build_text_jsonl(
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     print(f"[INFO] Wrote {len(records)} text records to {output_jsonl}")
-    if missing_tsv:
-        print(f"[WARN] Missing TSV for {len(missing_tsv)} uuids (skipped). e.g. {missing_tsv[:5]}")
+    if missing:
+        print(f"[WARN] Missing TSV for {len(missing)} uuids (skipped). e.g. {missing[:5]}")
     return len(records)
 
-# =====================================================================
-# eGeMAPS CSV: meta + eGeMAPS → feature CSV
-# =====================================================================
-def build_egemaps_csv(
-    meta_df: pd.DataFrame,
-    egemaps_df: pd.DataFrame,
-    *,
-    output_csv: Path,
-) -> Tuple[int, int]:
-    if "uuid" not in meta_df.columns:
-        raise ValueError("Meta CSV is expected to contain a 'uuid' column.")
-    if "uuid" not in egemaps_df.columns:
-        raise ValueError("eGeMAPS CSV is expected to contain a 'uuid' column.")
-
+def build_egemaps_csv(meta_df: pd.DataFrame, egemaps_df: pd.DataFrame, *, output_csv: Path) -> Tuple[int, int]:
     merged = meta_df.merge(egemaps_df, on="uuid", how="inner")
-    print(
-        f"[INFO] Merged meta ({len(meta_df)}) with eGeMAPS ({len(egemaps_df)}) → {len(merged)} rows."
-    )
+    print(f"[INFO] Merged meta ({len(meta_df)}) with eGeMAPS ({len(egemaps_df)}) -> {len(merged)} rows.")
 
     feature_cols = [c for c in egemaps_df.columns if c != "uuid"]
     ordered_cols = ["uuid", "Diagnosis", "sex", "age", "education"] + feature_cols
@@ -207,15 +182,24 @@ def build_egemaps_csv(
 # Orchestrator
 # =====================================================================
 def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str, str]:
-    pred_cfg = get_predictive_config(path=config_path)
+    cfg = load_text_config(config_path)
+    pred_cfg = get_predictive_config(cfg=cfg)
 
-    meta_csv = Path(_require(pred_cfg, "meta_csv"))
-    egemaps_csv = Path(_require(pred_cfg, "egemaps_csv"))
-    tsv_root = Path(_require(pred_cfg, "tsv_root"))
-    out_text_jsonl = Path(_require(pred_cfg, "output_text_jsonl"))
-    out_egemaps_csv = Path(_require(pred_cfg, "output_egemaps_csv"))
+    meta_csv = Path(_require(pred_cfg, "meta_csv", where="predictive"))
+    egemaps_csv = Path(_require(pred_cfg, "egemaps_csv", where="predictive"))
+    tsv_root = Path(_require(pred_cfg, "tsv_root", where="predictive"))
+    out_text_jsonl = Path(_require(pred_cfg, "output_text_jsonl", where="predictive"))
+    out_egemaps_csv = Path(_require(pred_cfg, "output_egemaps_csv", where="predictive"))
 
-    keep_speakers = _get_keep_speakers(pred_cfg)
+    dataset_name = str(pred_cfg.get("dataset_name", "Chinese_predictive_challenge")).strip() or "Chinese_predictive_challenge"
+
+    tsv_cfg = _get_dict(pred_cfg, "tsv", where="predictive")
+    keep_speakers = _norm_str_list(tsv_cfg.get("keep_speakers"))
+    drop_silence = bool(tsv_cfg.get("drop_silence", True))
+    order_by = tsv_cfg.get("order_by", None)
+    order_by = None if order_by is None else str(order_by).strip()
+    if order_by not in (None, "no", "start_time"):
+        raise ValueError("predictive.tsv.order_by must be one of: 'no', 'start_time', null")
 
     if not meta_csv.exists():
         raise FileNotFoundError(f"Meta CSV not found: {meta_csv}")
@@ -226,27 +210,21 @@ def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str
 
     print(f"[INFO] Loading meta from: {meta_csv}")
     meta_df = pd.read_csv(meta_csv)
+    if "label" not in meta_df.columns or "uuid" not in meta_df.columns:
+        raise ValueError("Meta CSV must contain columns: uuid, label")
 
-    if "label" not in meta_df.columns:
-        raise ValueError("Meta CSV is expected to contain a 'label' column.")
-    if "uuid" not in meta_df.columns:
-        raise ValueError("Meta CSV is expected to contain a 'uuid' column.")
-
-    # uuid normalize + dedup (single point)
     meta_df, meta_stats = _normalize_and_dedup_uuid(meta_df, name="meta")
     if meta_stats["dropped_invalid"] > 0:
         print(f"[WARN] meta: dropped invalid uuid rows = {meta_stats['dropped_invalid']}")
     if meta_stats["dropped_dups"] > 0:
         print(f"[WARN] meta: dropped duplicated uuid rows = {meta_stats['dropped_dups']}")
 
-    # Normalize labels to canonical 3-way: AD / HC / MCI
     meta_df["Diagnosis"] = meta_df["label"].apply(lambda s: ADType.from_any(s).value)
 
     print(f"[INFO] Loading eGeMAPS from: {egemaps_csv}")
     egemaps_df = pd.read_csv(egemaps_csv)
-
     if "uuid" not in egemaps_df.columns:
-        raise ValueError("eGeMAPS CSV is expected to contain a 'uuid' column.")
+        raise ValueError("eGeMAPS CSV must contain column: uuid")
 
     egemaps_df, eg_stats = _normalize_and_dedup_uuid(egemaps_df, name="eGeMAPS")
     if eg_stats["dropped_invalid"] > 0:
@@ -258,8 +236,10 @@ def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str
         meta_df,
         tsv_root=tsv_root,
         output_jsonl=out_text_jsonl,
+        dataset_name=dataset_name,
         keep_speakers=keep_speakers,
-        dataset_name=PREDICTIVE_DATASET_NAME,
+        drop_silence=drop_silence,
+        order_by=order_by,
     )
     build_egemaps_csv(meta_df, egemaps_df, output_csv=out_egemaps_csv)
 
@@ -269,23 +249,12 @@ def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str
 # CLI
 # =====================================================================
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Preprocess the Chinese predictive challenge dataset "
-            "(meta + TSV transcripts + eGeMAPS) – config-driven."
-        )
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config_text.yaml（預設：專案根目錄的 config_text.yaml）",
-    )
-    return parser
+    p = argparse.ArgumentParser(description="Preprocess predictive dataset (paper-strict, YAML-driven).")
+    p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
+    return p
 
 def cli_main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
+    args = build_arg_parser().parse_args()
     run_predictive_preprocessing(config_path=args.config)
 
 if __name__ == "__main__":
