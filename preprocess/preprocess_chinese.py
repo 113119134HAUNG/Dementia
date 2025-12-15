@@ -36,7 +36,6 @@ def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
         raise KeyError(f"Config missing required key: {prefix}{key}")
     return cfg[key]
 
-
 def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, Any]:
     v = _require(cfg, key, where=where)
     if not isinstance(v, dict):
@@ -65,9 +64,7 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) ->
 
     for col in ("id", "label", "transcript"):
         if col not in df.columns:
-            raise ValueError(
-                f"ASR CSV missing required column: {col} (paper-strict, no fallback)"
-            )
+            raise ValueError(f"ASR CSV missing required column: {col} (paper-strict, no fallback)")
 
     out_df = pd.DataFrame(
         {
@@ -142,15 +139,23 @@ def normalize_diagnosis_labels(df: pd.DataFrame, *, label_map: Dict[str, Any]) -
     if "Diagnosis" not in df.columns:
         raise ValueError("Expected column 'Diagnosis' not found.")
 
-    mp = {str(k).strip().upper(): str(v).strip() for k, v in (label_map or {}).items()}
+    # paper-strict: normalize label_map keys using the SAME canonical normalizer as ADType
+    mp_norm: Dict[str, str] = {}
+    for k, v in (label_map or {}).items():
+        k_norm = ADType._normalize(str(k))  # canonical form: remove spaces/punct, upper
+        mp_norm[k_norm] = str(v).strip()
 
     def _map_one(x: Any) -> str:
-        s = "" if x is None else str(x).strip()
-        s_up = s.upper()
-        if s_up in mp:
-            s = mp[s_up]
+        raw = "" if x is None else str(x).strip()
+        raw_norm = ADType._normalize(raw)
+
+        # YAML-driven override first
+        if raw_norm in mp_norm:
+            raw = mp_norm[raw_norm]
+
+        # canonicalize to AD/HC/MCI if possible
         try:
-            return ADType.from_any(s).value
+            return ADType.from_any(raw).value
         except Exception:
             return "Unknown"
 
