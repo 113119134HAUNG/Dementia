@@ -15,17 +15,12 @@ common:
   logreg_max_iter: &logreg_max_iter 1000
   max_seq_length: &max_seq_length 512
 
-# ---------------------------------------------------------------------
-# ASR (audio → transcript CSV)
-# ---------------------------------------------------------------------
 asr:
   data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
   output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
-
   model_size: "large-v2"
   device: "cuda"
   compute_type: "float16"
-
   initial_prompt: |-
     以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、
     輕度認知障礙（MCI）與健康對照組（HC）的臨床訪談與語言測驗，
@@ -40,7 +35,6 @@ asr:
     「量表」、「測驗」、「醫師」、「受試者」、「照顧者」。
     對於 AD、MCI、HC 等縮寫，請以大寫英文字母保留。
     若有單字實在聽不清楚，請不要亂猜，可以以『[聽不清楚]』標示。
-
   decode:
     language: "zh"
     task: "transcribe"
@@ -55,31 +49,21 @@ asr:
     vad_filter: false
     without_timestamps: true
 
-# ---------------------------------------------------------------------
-# Predictive dataset (TSV + eGeMAPS)
-# ---------------------------------------------------------------------
 predictive:
   meta_csv: "/content/predictive/2_final_list_train.csv"
   egemaps_csv: "/content/predictive/egemaps_final.csv"
   tsv_root: "/content/predictive/tsv"
-
   output_text_jsonl: &predictive_jsonl "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
   output_egemaps_csv: "/content/predictive_egemaps_features.csv"
-
   dataset_name: "Chinese_predictive_challenge"
-
   keep_speakers: &pred_keep_speakers ["<A>", "<B>"]
   tsv:
     keep_speakers: *pred_keep_speakers
     drop_silence: true
-    order_by: "no"   # "no" | "start_time" | null
+    order_by: "no"
 
-# ---------------------------------------------------------------------
-# Text preprocessing & dataset merging
-# ---------------------------------------------------------------------
 text:
   ncmmsc_jsonl: &ncmmsc_jsonl "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
-
   output_dir: "/content/chinese_combined"
   combined_name: "Chinese_Combined.jsonl"
   cleaned_jsonl: "/content/chinese_combined/cleaned.jsonl"
@@ -117,13 +101,9 @@ text:
     enabled: true
     std_k: *length_std_k
 
-# ---------------------------------------------------------------------
-# Features (YAML-driven for paper/evaluate_cv.py)
-# ---------------------------------------------------------------------
 features:
   tfidf:
     vectorizer:
-      # Chinese-safe: char n-grams (no need for whitespace segmentation)
       analyzer: "char"
       ngram_range: [2, 4]
       lowercase: false
@@ -145,13 +125,8 @@ features:
 
   bert:
     model_name: "bert-base-chinese"
-
-    # NOTE: 目前你貼的 cv_features.py 只支援 mean pooling。
-    #       這兩個欄位保留作為未來擴充（cls / last4_concat_mean）用，不影響執行。
-    embedding_strategy: "mean"   # mean | cls | last4_concat_mean (future)
-    last_n_layers: 4             # for last4_concat_mean (future)
-
-    pooling: "mean"
+    embedding_strategy: "mean"
+    last_n_layers: 4 
     max_seq_length: *max_seq_length
     device: "cuda"
     logreg:
@@ -162,14 +137,11 @@ features:
       random_state: *seed
 
   glove:
-    # Chinese non-contextual embeddings (e.g., fastText cc.zh.300.vec)
-    # Make sure your cv_features.py supports:
-    #   - tokenizer: jieba/char/whitespace
-    #   - max_words: optional cap
+    # fastText .vec (word + 300 dims)
     embeddings_path: "/content/embeddings/cc.zh.300.vec"
     embedding_dim: 300
-    tokenizer: "jieba"     # "jieba" | "char" | "whitespace"
-    max_words: 200000      # optional cap to reduce memory/time
+    tokenizer: "jieba"
+    max_words: 200000
     lowercase: false
     remove_stopwords: false
     stopwords_lang: null
@@ -195,13 +167,11 @@ features:
 
   crossval:
     enabled: true
-
     n_splits: 5
     shuffle: true
     random_state: *seed
     output_indices: "/content/chinese_combined/folds_indices.json"
 
-    # methods to run (order matters)
     methods: ["tfidf", "bert", "glove", "gemma"]
 
     tfidf_fit_scope: "full"   # "full" | "train"
