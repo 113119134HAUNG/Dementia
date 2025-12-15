@@ -1,21 +1,33 @@
 # -*- coding: utf-8 -*-
 """
-enums.py
+enums.py (paper-strict)
 
-Canonical enums used across ASR, text preprocessing, and modeling.
+Canonical enums used across ASR, preprocessing, and modeling.
 
 Diagnosis labels (3-way):
-    - AD  : Alzheimer (ProbableAD / PossibleAD / AD)
-    - HC  : Healthy controls (HC / NC / CTRL / CONTROL)
-    - MCI : Mild Cognitive Impairment
+  - AD
+  - HC
+  - MCI
 
-Dataset splits:
-    - TRAIN / VALID / TEST
+NOTE
+----
+Make ADType.from_any() the single source of truth for label normalization.
+Avoid duplicating label_map rules in YAML and in code.
 """
 
+from __future__ import annotations
+
 from enum import Enum
-from typing import Optional
+from typing import Optional, Any
 import re
+
+# compile once (paper-strict: deterministic + minimal overhead)
+_NON_ALNUM = re.compile(r"[^A-Z0-9]+")
+
+# canonical mapping sets (single point)
+_AD_SET = frozenset({"AD", "PROBABLEAD", "POSSIBLEAD"})
+_HC_SET = frozenset({"HC", "NC", "CN", "CTRL", "CONTROL", "CONTROLS", "HEALTHY", "NORMAL"})
+_MCI_SET = frozenset({"MCI", "MILDCOGNITIVEIMPAIRMENT"})
 
 class ADType(str, Enum):
     """Canonical 3-way diagnosis labels: AD / HC / MCI."""
@@ -24,40 +36,40 @@ class ADType(str, Enum):
     MCI = "MCI"
 
     @staticmethod
-    def _normalize(label: str) -> str:
-        """
-        Normalize label strings robustly:
-        - upper-case
-        - remove whitespace/punctuation (e.g., "Probable AD" -> "PROBABLEAD")
-        """
+    def _normalize(label: Any) -> str:
+        """Normalize raw label robustly into compact upper alnum token."""
         s = str(label).strip().upper()
-        s = re.sub(r"[^A-Z0-9]+", "", s)
+        s = _NON_ALNUM.sub("", s)
         return s
 
     @classmethod
-    def from_any(cls, label: Optional[str]) -> "ADType":
-        """Map a raw diagnosis string from any dataset to a canonical ADType."""
+    def from_any(cls, label: Optional[Any]) -> "ADType":
+        """Map a raw diagnosis string from any dataset to canonical ADType."""
         if label is None:
             raise ValueError("Diagnosis label is None")
 
         s = cls._normalize(label)
+        if not s:
+            raise ValueError("Diagnosis label is empty")
 
-        # AD family
-        if s in {"AD", "PROBABLEAD", "POSSIBLEAD"}:
+        if s in _AD_SET:
             return cls.AD
-
-        # HC family (common variants across datasets)
-        if s in {"HC", "NC", "CN", "CTRL", "CONTROL", "CONTROLS", "HEALTHY", "NORMAL"}:
+        if s in _HC_SET:
             return cls.HC
-
-        # MCI family
-        if s in {"MCI", "MILDCOGNITIVEIMPAIRMENT"}:
+        if s in _MCI_SET:
             return cls.MCI
 
         raise ValueError(f"Unknown diagnosis label: {label!r}")
 
+    @classmethod
+    def try_from_any(cls, label: Optional[Any]) -> Optional["ADType"]:
+        """Return ADType if known else None (avoid scattered try/except)."""
+        try:
+            return cls.from_any(label)
+        except Exception:
+            return None
+
 class DatasetSplit(str, Enum):
-    """Standard split names for train/valid/test."""
     TRAIN = "train"
     VALID = "valid"
     TEST = "test"
