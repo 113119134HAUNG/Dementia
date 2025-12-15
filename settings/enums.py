@@ -15,7 +15,7 @@ Dataset splits:
 
 from enum import Enum
 from typing import Optional
-
+import re
 
 class ADType(str, Enum):
     """Canonical 3-way diagnosis labels: AD / HC / MCI."""
@@ -23,39 +23,35 @@ class ADType(str, Enum):
     HC = "HC"
     MCI = "MCI"
 
+    @staticmethod
+    def _normalize(label: str) -> str:
+        """
+        Normalize label strings robustly:
+        - upper-case
+        - remove whitespace/punctuation (e.g., "Probable AD" -> "PROBABLEAD")
+        """
+        s = str(label).strip().upper()
+        s = re.sub(r"[^A-Z0-9]+", "", s)
+        return s
+
     @classmethod
     def from_any(cls, label: Optional[str]) -> "ADType":
-        """Map a raw diagnosis string from any dataset to a canonical ADType.
-
-        Examples
-        --------
-        >>> ADType.from_any("ProbableAD")
-        <ADType.AD: 'AD'>
-        >>> ADType.from_any("CTRL")
-        <ADType.HC: 'HC'>
-        >>> ADType.from_any("mci")
-        <ADType.MCI: 'MCI'>
-
-        Raises
-        ------
-        ValueError
-            If the input label cannot be mapped.
-        """
+        """Map a raw diagnosis string from any dataset to a canonical ADType."""
         if label is None:
             raise ValueError("Diagnosis label is None")
 
-        s = str(label).strip().upper()
+        s = cls._normalize(label)
 
         # AD family
         if s in {"AD", "PROBABLEAD", "POSSIBLEAD"}:
             return cls.AD
 
-        # HC family
-        if s in {"HC", "NC", "CTRL", "CONTROL"}:
+        # HC family (common variants across datasets)
+        if s in {"HC", "NC", "CN", "CTRL", "CONTROL", "CONTROLS", "HEALTHY", "NORMAL"}:
             return cls.HC
 
         # MCI family
-        if s == "MCI":
+        if s in {"MCI", "MILDCOGNITIVEIMPAIRMENT"}:
             return cls.MCI
 
         raise ValueError(f"Unknown diagnosis label: {label!r}")
