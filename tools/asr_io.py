@@ -21,7 +21,6 @@ from text_cleaning import clean_asr_chinese
 # =====================================================================
 # Canonical CSV schema
 # =====================================================================
-
 #: ASR CSV columns:
 #:   - id                 : unique ID (e.g. "AD_0001")
 #:   - label              : diagnosis label (AD / HC / MCI)
@@ -41,7 +40,6 @@ CSV_FIELDNAMES = [
 # =====================================================================
 # File opening helper
 # =====================================================================
-
 def open_asr_csv_writer(output_csv: Path) -> Tuple[TextIO, csv.DictWriter]:
     """Open an ASR CSV file for writing and emit the header row."""
     output_csv = Path(output_csv)
@@ -55,7 +53,6 @@ def open_asr_csv_writer(output_csv: Path) -> Tuple[TextIO, csv.DictWriter]:
 # =====================================================================
 # Write single result row (with cleaning)
 # =====================================================================
-
 def write_asr_row_with_cleaning(
     writer: csv.DictWriter,
     *,
@@ -68,16 +65,27 @@ def write_asr_row_with_cleaning(
     """Write a single ASR result into the CSV, including transcript cleaning.
 
     Cleaning logic is delegated to :func:`text_cleaning.clean_asr_chinese`.
+    Raw transcript is always preserved in the `transcript` column.
     """
-    cleaned = clean_asr_chinese(raw_transcript)
+    sid = "" if sample_id is None else str(sample_id).strip()
+    lb = "" if label is None else str(label).strip()
+    raw = "" if raw_transcript is None else str(raw_transcript)
+    ap = "" if audio_path is None else str(audio_path)
+
+    cleaned = clean_asr_chinese(raw) if raw else ""
+
+    try:
+        dur = float(duration) if duration is not None else 0.0
+    except (TypeError, ValueError):
+        dur = 0.0
 
     writer.writerow(
         {
-            "id": sample_id,
-            "label": label,
-            "transcript": raw_transcript,
+            "id": sid,
+            "label": lb,
+            "transcript": raw,
             "cleaned_transcript": cleaned,
-            "audio_path": audio_path,
-            "duration": duration,
+            "audio_path": ap,
+            "duration": dur,
         }
     )
