@@ -8,8 +8,13 @@ Strict + clean rules:
 - Single source of truth: YAML only
 - No printing
 - No CLI
-- Minimal surface area (one loader + one accessor)
-- Optional caching to avoid repeated disk reads within a process
+- Minimal surface area (one loader + section accessors)
+- Cached to avoid repeated disk reads within a process
+
+Paper-strict note
+-----------------
+We normalize the config path for caching so that equivalent paths
+(e.g., "./config_text.yaml" vs "config_text.yaml") share the same cache entry.
 """
 
 from __future__ import annotations
@@ -23,32 +28,45 @@ import yaml
 DEFAULT_CONFIG_PATH = Path("config_text.yaml")
 
 # =====================================================================
-# Core loader
+# Core path resolver
 # =====================================================================
 def _resolve_path(path: Optional[str]) -> Path:
     p = DEFAULT_CONFIG_PATH if path is None else Path(path)
+    p = p.expanduser().resolve()
     if not p.exists():
         raise FileNotFoundError(f"Config file not found: {p}")
     return p
 
+def _cache_key(path: Optional[str]) -> str:
+    """Canonical cache key for a config path."""
+    return str(_resolve_path(path))
+
+# =====================================================================
+# Core loader (cached)
+# =====================================================================
 @lru_cache(maxsize=8)
-def load_text_config(path: Optional[str] = None) -> Dict[str, Any]:
-    """Load full YAML config as a dict (cached).
-
-    Notes
-    -----
-    - Cached by `path` string (None uses DEFAULT_CONFIG_PATH).
-    - If you edit the YAML during runtime, call `load_text_config.cache_clear()`.
-    """
-    cfg_path = _resolve_path(path)
-
+def _load_text_config_by_key(path_key: str) -> Dict[str, Any]:
+    cfg_path = Path(path_key)
     with cfg_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     if not isinstance(cfg, dict):
         raise ValueError(f"Config file {cfg_path} must be a YAML mapping (dict).")
-
     return cfg
+
+def load_text_config(path: Optional[str] = None) -> Dict[str, Any]:
+    """Load full YAML config as a dict (cached).
+
+    Notes
+    -----
+    - Cached by normalized absolute path string.
+    - If you edit the YAML during runtime, call `clear_config_cache()`.
+    """
+    return _load_text_config_by_key(_cache_key(path))
+
+def clear_config_cache() -> None:
+    """Clear YAML config cache (useful in notebooks after editing YAML)."""
+    _load_text_config_by_key.cache_clear()
 
 # =====================================================================
 # Section accessors
