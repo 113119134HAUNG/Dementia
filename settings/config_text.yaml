@@ -5,7 +5,7 @@
 common:
   seed: &seed 42
 
-  # preprocessing (legacy anchors kept for backward compat)
+  # preprocessing
   split_test_size: &split_test_size 0.2
   length_std_k: &length_std_k 1.0
   min_per_class: &min_per_class 2
@@ -68,9 +68,7 @@ predictive:
 
   dataset_name: "Chinese_predictive_challenge"
 
-  # speaker filtering (optional)
   keep_speakers: &pred_keep_speakers ["<A>", "<B>"]  # null = keep all
-
   tsv:
     keep_speakers: *pred_keep_speakers
     drop_silence: true
@@ -80,20 +78,14 @@ predictive:
 # Text preprocessing & dataset merging
 # ---------------------------------------------------------------------
 text:
-  # NCMMSC JSONL output from ASR CSV (single truth)
   ncmmsc_jsonl: &ncmmsc_jsonl "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
 
   output_dir: "/content/chinese_combined"
   combined_name: "Chinese_Combined.jsonl"
 
-  # legacy (preprocess_chinese no longer needs split outputs)
-  train_jsonl: "train_chinese.jsonl"
-  test_jsonl: "test_chinese.jsonl"
-
-  # NEW: cleaned output (evaluate_cv reads this)
+  # NEW: cleaned output for paper/evaluate_cv.py
   cleaned_jsonl: "/content/chinese_combined/cleaned.jsonl"
 
-  # Merge candidates (ONLY this list is used to merge)
   corpora:
     - name: "NCMMSC2021_AD_Competition"
       path: *ncmmsc_jsonl
@@ -102,16 +94,13 @@ text:
     - name: "TAUKADIAL"
       path: null
 
-  # Subset rules (ONLY applied once in dataset_subset.apply_subset)
   target_datasets: ["NCMMSC2021_AD_Competition"]
   target_labels: ["AD", "HC"]
   balance: true
   subset_seed: *seed
   cap_per_class: 300
 
-  # Label normalization (config-driven)
   label_map:
-    # HC variants
     NC: "HC"
     CN: "HC"
     CTRL: "HC"
@@ -119,36 +108,21 @@ text:
     CONTROLS: "HC"
     HEALTHY: "HC"
     NORMAL: "HC"
-
-    # AD variants
     PROBABLEAD: "AD"
     POSSIBLEAD: "AD"
-
-    # MCI variants
     MILDCOGNITIVEIMPAIRMENT: "MCI"
 
-  # Language filtering (config-driven)
   language_filter:
     drop_languages: ["en"]
 
-  # Length-based outlier filter (config-driven)
   length_filter:
     enabled: true
     std_k: *length_std_k
 
-  # legacy split (safe to keep; not required by current flow)
-  split:
-    test_size: *split_test_size
-    random_state: *seed
-    stratify: true
-    min_per_class: *min_per_class
-
 # ---------------------------------------------------------------------
-# Features (YAML-driven for evaluate_cv)
+# Features (YAML-driven for paper/evaluate_cv)
 # ---------------------------------------------------------------------
 features:
-  method: "bert"
-
   tfidf:
     vectorizer:
       lowercase: true
@@ -212,28 +186,27 @@ features:
 
     # folds config (paper-aligned: save once, reuse across methods)
     n_splits: 5
-    stratified: true
     shuffle: true
     random_state: *seed
     output_indices: "/content/chinese_combined/folds_indices.json"
+
+    # methods to run (order matters)
+    methods: ["tfidf", "bert", "glove", "gemma"]
+
+    # TF-IDF fit scope (paper snippet behavior)
+    tfidf_fit_scope: "full"   # "full" | "train"
+
+    # batching (all from YAML)
+    batch_size: 8
+    bert_batch_size: 8
+    gemma_batch_size: 4
 
     # metrics config
     metrics_average: "macro"
     zero_division: 0
     metrics_output: "/content/chinese_combined/cv_metrics.json"
 
-    # methods to run (order matters)
-    methods: ["tfidf", "bert", "glove", "gemma"]
-
-    # paper snippet behavior: TF-IDF fit on full data then slice folds
-    # use "train" if you want strict per-fold train-only fitting
-    tfidf_fit_scope: "full"   # "full" | "train"
-
-    # batching (optional; evaluate_cv reads these)
-    batch_size: 8
-    bert_batch_size: 8
-    gemma_batch_size: 2
-
     # printing toggles
     print_classification_report: true
     print_confusion_matrix: true
+    print_method_summary: true
