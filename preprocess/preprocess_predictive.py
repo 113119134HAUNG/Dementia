@@ -9,6 +9,7 @@ preprocess_predictive.py (paper-strict, converged)
 - paper-strict:
     * if order_by is set, required TSV columns MUST exist (fail-fast, no silent fallback)
     * deterministic output order via sorting by uuid after dedup
+    * keep_speakers supports backward-compat: predictive.keep_speakers (fallback)
 """
 
 from __future__ import annotations
@@ -175,6 +176,11 @@ def build_text_jsonl(
 
 def build_egemaps_csv(meta_df: pd.DataFrame, egemaps_df: pd.DataFrame, *, output_csv: Path) -> Tuple[int, int]:
     merged = meta_df.merge(egemaps_df, on="uuid", how="inner")
+
+    # deterministic order
+    if merged is not None and not merged.empty and "uuid" in merged.columns:
+        merged = merged.sort_values(by="uuid", kind="mergesort").reset_index(drop=True)
+
     print(f"[INFO] Merged meta ({len(meta_df)}) with eGeMAPS ({len(egemaps_df)}) -> {len(merged)} rows.")
 
     feature_cols = [c for c in egemaps_df.columns if c != "uuid"]
@@ -201,8 +207,14 @@ def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str
 
     dataset_name = str(pred_cfg.get("dataset_name", "Chinese_predictive_challenge")).strip() or "Chinese_predictive_challenge"
 
+    # paper-strict: predictive.tsv must exist and be a dict
     tsv_cfg = _get_dict(pred_cfg, "tsv", where="predictive")
+
+    # keep_speakers: prefer predictive.tsv.keep_speakers; fallback to predictive.keep_speakers (back-compat)
     keep_speakers = _norm_str_list(tsv_cfg.get("keep_speakers"))
+    if keep_speakers is None:
+        keep_speakers = _norm_str_list(pred_cfg.get("keep_speakers"))
+
     drop_silence = bool(tsv_cfg.get("drop_silence", True))
     order_by = tsv_cfg.get("order_by", None)
     order_by = None if order_by is None else str(order_by).strip()
