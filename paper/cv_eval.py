@@ -159,7 +159,9 @@ def evaluate_tfidf_trainonly(
             transformer_cfg=transformer_cfg,
         )
 
-        ytr, yte = y[tr], y[te]
+        # IMPORTANT: index y with the SAME index type (list of ints)
+        ytr = y[tr_idx]
+        yte = y[te_idx]
 
         clf = LogisticRegression(**clf_template.get_params())
         clf.fit(Xtr, ytr)
@@ -177,8 +179,8 @@ def evaluate_tfidf_trainonly(
                 "precision": prec,
                 "recall": rec,
                 "f1": f1,
-                "n_train": int(len(tr)),
-                "n_test": int(len(te)),
+                "n_train": int(len(tr_idx)),
+                "n_test": int(len(te_idx)),
             }
         )
 
