@@ -9,6 +9,7 @@ Rules:
 - ASR CSV MUST contain 'transcript' (no fallback).
 - label_map / language_filter / length_filter.enabled / split.stratify are YAML-driven.
 - NCMMSC dataset name MUST come from text.corpora entry matching text.ncmmsc_jsonl (fail-fast).
+- length_filter must NOT leak 'length' column to outputs (drop before return).
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
         raise KeyError(f"Config missing required key: {prefix}{key}")
     return cfg[key]
 
+
 def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, Any]:
     v = _require(cfg, key, where=where)
     if not isinstance(v, dict):
@@ -50,7 +52,6 @@ def _get_list(cfg: Dict[str, Any], key: str, *, where: str = "") -> List[Any]:
     return v
 
 def _resolve_path(p: Any) -> Path:
-    # normalize for strict comparisons
     return Path(str(p)).expanduser().resolve()
 
 # =====================================================================
@@ -64,7 +65,9 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) ->
 
     for col in ("id", "label", "transcript"):
         if col not in df.columns:
-            raise ValueError(f"ASR CSV missing required column: {col} (paper-strict, no fallback)")
+            raise ValueError(
+                f"ASR CSV missing required column: {col} (paper-strict, no fallback)"
+            )
 
     out_df = pd.DataFrame(
         {
@@ -154,7 +157,6 @@ def normalize_diagnosis_labels(df: pd.DataFrame, *, label_map: Dict[str, Any]) -
     out = df.copy()
     out["Diagnosis"] = out["Diagnosis"].apply(_map_one)
 
-    # NOTE: do NOT drop Unknown here (paper-strict: label filtering belongs to apply_subset)
     unk_n = int((out["Diagnosis"] == "Unknown").sum())
     if unk_n > 0:
         print(f"[WARN] Diagnosis == 'Unknown' rows = {unk_n} (will be removed by apply_subset if target_labels set).")
@@ -208,6 +210,11 @@ def length_filter(df: pd.DataFrame, *, enabled: bool, std_k: float) -> pd.DataFr
     keep = (merged["length"] >= lower) & (merged["length"] <= upper)
 
     filtered = out.loc[keep.values].reset_index(drop=True)
+
+    # paper-strict: do NOT leak helper columns
+    if "length" in filtered.columns:
+        filtered = filtered.drop(columns=["length"])
+
     print(f"[INFO] After length filtering: {len(filtered)} samples remaining.")
     if not filtered.empty:
         print("[INFO] Label distribution after filtering:\n", filtered["Diagnosis"].value_counts())
@@ -236,7 +243,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     if not df.empty and (df["Diagnosis"].astype(str) == "Unknown").any():
         raise ValueError("Found Diagnosis=='Unknown' after apply_subset. Fix label_map/ADType or target_labels.")
 
-    # clean only after subset (single point, avoids cleaning dropped corpora)
+    # clean only after subset (single point)
     df = clean_text_column(df)
 
     if df.empty:
