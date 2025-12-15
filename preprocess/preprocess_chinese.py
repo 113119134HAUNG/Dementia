@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-preprocess_chinese.py (paper-strict)
+preprocess_chinese.py (paper-strict, converged)
 
-Rules (single point of truth / single point of processing):
+Rules:
 - Load YAML once.
 - Merge ONLY uses text.corpora (include only existing paths).
 - Dataset/label/balance/cap filtering happens ONLY in apply_subset().
-- ASR CSV MUST contain 'transcript' (no fallback to cleaned_transcript).
+- ASR CSV MUST contain 'transcript' (no fallback).
 - label_map / language_filter / length_filter.enabled / split.stratify are YAML-driven.
+- NCMMSC dataset name MUST come from text.corpora entry matching text.ncmmsc_jsonl (fail-fast).
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
         raise KeyError(f"Config missing required key: {prefix}{key}")
     return cfg[key]
 
-
 def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, Any]:
     v = _require(cfg, key, where=where)
     if not isinstance(v, dict):
@@ -42,13 +42,16 @@ def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, An
         raise ValueError(f"{prefix}{key} must be a dict.")
     return v
 
-
 def _get_list(cfg: Dict[str, Any], key: str, *, where: str = "") -> List[Any]:
     v = _require(cfg, key, where=where)
     if not isinstance(v, list):
         prefix = f"{where}." if where else ""
         raise ValueError(f"{prefix}{key} must be a list.")
     return v
+
+def _resolve_path(p: Any) -> Path:
+    # normalize for strict comparisons
+    return Path(str(p)).expanduser().resolve()
 
 # =====================================================================
 # Step 1: ASR CSV -> NCMMSC JSONL
@@ -59,7 +62,6 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) ->
 
     df = pd.read_csv(csv_path_p, encoding="utf-8-sig")
 
-    # paper-strict: require canonical ASR schema
     for col in ("id", "label", "transcript"):
         if col not in df.columns:
             raise ValueError(f"ASR CSV missing required column: {col} (paper-strict, no fallback)")
@@ -69,7 +71,7 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) ->
             "ID": df["id"].astype(str),
             "Diagnosis": df["label"].astype(str),
             "Text_interviewer_participant": df["transcript"].fillna("").astype(str),
-            "Dataset": dataset_name,
+            "Dataset": str(dataset_name),
             "Languages": "zh",
         }
     )
@@ -80,7 +82,7 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) ->
     return str(jsonl_path_p)
 
 # =====================================================================
-# Step 2: Merge JSONLs (only existing, no dataset filtering here)
+# Step 2: Merge JSONLs (only existing, ONLY text.corpora)
 # =====================================================================
 def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_name: str) -> str:
     out_dir = Path(output_dir)
@@ -90,16 +92,18 @@ def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_nam
     for c in corpora:
         if not isinstance(c, dict):
             raise ValueError("text.corpora entries must be dicts with keys: name, path.")
-        name = c.get("name", None)
-        path = c.get("path", None)
+        if "name" not in c or "path" not in c:
+            raise ValueError("Each text.corpora entry must contain keys: name, path.")
 
+        path = c.get("path", None)
         if path is None:
             continue
 
         p = Path(str(path))
         if not p.exists():
-            print(f"[WARN] Missing JSONL, skip: {p} (name={name})")
+            print(f"[WARN] Missing JSONL, skip: {p} (name={c.get('name')})")
             continue
+
         input_files.append(str(p))
 
     if not input_files:
@@ -117,7 +121,7 @@ def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_nam
     return str(merged_path)
 
 # =====================================================================
-# Step 3-6: Load + dedup + normalize + filter + clean + subset + length
+# Step 3-6: Load + dedup + normalize + filter + subset + clean + length
 # =====================================================================
 def dedup_records(df: pd.DataFrame) -> pd.DataFrame:
     """Paper-strict: drop duplicated (Dataset, ID) if possible."""
@@ -134,6 +138,7 @@ def dedup_records(df: pd.DataFrame) -> pd.DataFrame:
 def normalize_diagnosis_labels(df: pd.DataFrame, *, label_map: Dict[str, Any]) -> pd.DataFrame:
     if "Diagnosis" not in df.columns:
         raise ValueError("Expected column 'Diagnosis' not found.")
+
     mp = {str(k).strip().upper(): str(v).strip() for k, v in (label_map or {}).items()}
 
     def _map_one(x: Any) -> str:
@@ -149,11 +154,10 @@ def normalize_diagnosis_labels(df: pd.DataFrame, *, label_map: Dict[str, Any]) -
     out = df.copy()
     out["Diagnosis"] = out["Diagnosis"].apply(_map_one)
 
-    if (out["Diagnosis"] == "Unknown").any():
-        unk = out[out["Diagnosis"] == "Unknown"]
-        ds = set(unk["Dataset"].astype(str)) if "Dataset" in unk.columns else set()
-        print("[WARN] Found Diagnosis == 'Unknown'. Datasets:", ds)
-        out = out[out["Diagnosis"] != "Unknown"]
+    # NOTE: do NOT drop Unknown here (paper-strict: label filtering belongs to apply_subset)
+    unk_n = int((out["Diagnosis"] == "Unknown").sum())
+    if unk_n > 0:
+        print(f"[WARN] Diagnosis == 'Unknown' rows = {unk_n} (will be removed by apply_subset if target_labels set).")
 
     return out.reset_index(drop=True)
 
@@ -181,7 +185,6 @@ def clean_text_column(df: pd.DataFrame) -> pd.DataFrame:
 def length_filter(df: pd.DataFrame, *, enabled: bool, std_k: float) -> pd.DataFrame:
     if not enabled or df is None or df.empty:
         return df
-
     if std_k < 0:
         raise ValueError("text.length_filter.std_k must be >= 0.")
 
@@ -215,13 +218,13 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
 
     df = dedup_records(df)
 
+    # normalize labels (single point)
     label_map = text_cfg.get("label_map", {}) or {}
     df = normalize_diagnosis_labels(df, label_map=label_map)
 
+    # language filter (YAML-driven)
     lang_cfg = _get_dict(text_cfg, "language_filter", where="text")
     df = drop_languages(df, drop_langs=lang_cfg.get("drop_languages", []) or [])
-
-    df = clean_text_column(df)
 
     # subset happens ONLY here (paper-strict)
     df = apply_subset(df, text_cfg)
@@ -229,9 +232,17 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     if not df.empty:
         print("[INFO] Label distribution after subset:\n", df["Diagnosis"].value_counts())
 
+    # fail-fast if Unknown still exists after subset (strict)
+    if not df.empty and (df["Diagnosis"].astype(str) == "Unknown").any():
+        raise ValueError("Found Diagnosis=='Unknown' after apply_subset. Fix label_map/ADType or target_labels.")
+
+    # clean only after subset (single point, avoids cleaning dropped corpora)
+    df = clean_text_column(df)
+
     if df.empty:
         return df.reset_index(drop=True)
 
+    # length filter (YAML-driven)
     lf_cfg = _get_dict(text_cfg, "length_filter", where="text")
     enabled = bool(lf_cfg.get("enabled", True))
     std_k = float(_require(lf_cfg, "std_k", where="text.length_filter"))
@@ -295,7 +306,6 @@ def run_chinese_preprocessing(config_path: Optional[str] = None, skip_asr: bool 
     asr_cfg = get_asr_config(cfg=cfg)
     text_cfg = get_text_config(cfg=cfg)
 
-    # required keys
     ncmmsc_jsonl = _require(text_cfg, "ncmmsc_jsonl", where="text")
     output_dir = _require(text_cfg, "output_dir", where="text")
     merged_name = _require(text_cfg, "combined_name", where="text")
@@ -304,18 +314,20 @@ def run_chinese_preprocessing(config_path: Optional[str] = None, skip_asr: bool 
 
     corpora = _get_list(text_cfg, "corpora", where="text")
 
+    # strict: corpora must contain an entry whose path == text.ncmmsc_jsonl
+    ncmmsc_path = _resolve_path(ncmmsc_jsonl)
+    ncmmsc_name = None
+    for c in corpora:
+        if isinstance(c, dict) and c.get("path") is not None:
+            if _resolve_path(c["path"]) == ncmmsc_path:
+                ncmmsc_name = c.get("name")
+                break
+    if not ncmmsc_name:
+        raise ValueError("paper-strict: text.corpora must include NCMMSC entry matching text.ncmmsc_jsonl exactly.")
+
     # Step 1
     if not skip_asr:
         asr_csv = _require(asr_cfg, "output_csv", where="asr")
-        # Find NCMMSC dataset name from corpora list (strict)
-        ncmmsc_name = None
-        for c in corpora:
-            if isinstance(c, dict) and str(c.get("path", "")).strip() == str(ncmmsc_jsonl).strip():
-                ncmmsc_name = c.get("name", None)
-                break
-        if not ncmmsc_name:
-            # fallback: keep a canonical name if not found
-            ncmmsc_name = "NCMMSC2021_AD_Competition"
         csv_to_ncmmsc_jsonl(asr_csv, ncmmsc_jsonl, dataset_name=str(ncmmsc_name))
     else:
         print(f"[INFO] Skipping ASR -> JSONL. Using existing: {ncmmsc_jsonl}")
@@ -326,7 +338,7 @@ def run_chinese_preprocessing(config_path: Optional[str] = None, skip_asr: bool 
     # Step 3-6
     df_clean = load_and_process_chinese(merged_path, text_cfg)
 
-    # Step 7
+    # Step 7 (YAML-driven)
     sp_cfg = _get_dict(text_cfg, "split", where="text")
     test_size = float(_require(sp_cfg, "test_size", where="text.split"))
     random_state = int(_require(sp_cfg, "random_state", where="text.split"))
