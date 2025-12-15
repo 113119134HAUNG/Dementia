@@ -10,6 +10,22 @@
 # =====================================================================
 
 # ---------------------------------------------------------------------
+# Common shared values (single source of truth; reuse via YAML anchors)
+# ---------------------------------------------------------------------
+common:
+  seed: &seed 42
+
+  # preprocessing
+  split_test_size: &split_test_size 0.2
+  length_std_k: &length_std_k 1.0
+  min_per_class: &min_per_class 2
+
+  # modeling (logreg / seq length)
+  logreg_C: &logreg_C 1.0
+  logreg_max_iter: &logreg_max_iter 1000
+  max_seq_length: &max_seq_length 512
+
+# ---------------------------------------------------------------------
 #   ASR (audio → transcript CSV) – used by asr_ncmmsc.py
 # ---------------------------------------------------------------------
 asr:
@@ -99,11 +115,22 @@ text:
   train_jsonl: "train_chinese.jsonl"
   test_jsonl: "test_chinese.jsonl"
 
+  # subset rules (driven by YAML; code should not hardcode any defaults)
   target_datasets: ["NCMMSC2021_AD_Competition"]   # 只用 NCMMSC
   target_labels: ["AD", "HC"]                      # binary：AD vs HC
   balance: true                                    # 類別平衡（抽到同數）
-  subset_seed: 42
+  subset_seed: *seed
   cap_per_class: 300                               # debug 快速跑
+
+  # length-based outlier filter
+  length_filter:
+    std_k: *length_std_k                           # keep within mean ± std_k * std
+
+  # train/test split settings
+  split:
+    test_size: *split_test_size
+    random_state: *seed
+    min_per_class: *min_per_class                  # each class must have >= this count
 
 # ---------------------------------------------------------------------
 #    Text features + classifiers (TF-IDF / BERT / GloVe / Gemma)
@@ -131,11 +158,11 @@ features:
       sublinear_tf: false
 
     logreg:
-      C: 1.0
+      C: *logreg_C
       class_weight: "balanced"
       solver: "lbfgs"
-      max_iter: 1000
-      random_state: 42
+      max_iter: *logreg_max_iter
+      random_state: *seed
 
   # ---------------- BERT embeddings + Logistic Regression -----------
   bert:
@@ -143,20 +170,18 @@ features:
     # e.g. "bert-base-chinese" or "hfl/chinese-roberta-wwm-ext"
     model_name: "bert-base-chinese"
     pooling: "mean"            # "mean" / "cls" / "last4_mean"
-    max_seq_length: 512
+    max_seq_length: *max_seq_length
 
     device: "cuda"             # or "cpu"
 
     logreg:
-      C: 1.0
+      C: *logreg_C
       class_weight: "balanced"
       solver: "lbfgs"
-      max_iter: 1000
-      random_state: 42
+      max_iter: *logreg_max_iter
+      random_state: *seed
 
   # ---------------- GloVe embeddings + Logistic Regression ----------
-  # Mainly for English experiments (e.g. DementiaNet). Not used in the
-  # Chinese experiments unless you provide a Chinese embedding file.
   glove:
     embeddings_path: "/path/to/Glove/glove300.txt"
     embedding_dim: 300
@@ -169,29 +194,29 @@ features:
     pooling: "sum_l2norm"
 
     logreg:
-      C: 1.0
+      C: *logreg_C
       class_weight: "balanced"
       solver: "lbfgs"
-      max_iter: 1000
-      random_state: 42
+      max_iter: *logreg_max_iter
+      random_state: *seed
 
   # ---------------- Gemma-2B embeddings + Logistic Regression -------
   gemma:
     model_name: "google/gemma-2b"
-    pooling: "mean"          # sentence pooling over token embeddings
+    pooling: "mean"            # sentence pooling over token embeddings
 
-    max_seq_length: 512
-    padding: "longest"       # "longest" / "max_length"
+    max_seq_length: *max_seq_length
+    padding: "longest"         # "longest" / "max_length"
     truncation: true
 
-    device: "cuda"           # or "cpu"
+    device: "cuda"             # or "cpu"
 
     logreg:
-      C: 1.0
+      C: *logreg_C
       class_weight: "balanced"
       solver: "lbfgs"
-      max_iter: 1000
-      random_state: 42
+      max_iter: *logreg_max_iter
+      random_state: *seed
 
   # ---------------- Cross-Validation common settings ----------------
   crossval:
@@ -199,6 +224,6 @@ features:
     n_splits: 5
     stratified: true
     shuffle: true
-    random_state: 42
+    random_state: *seed
 
     metrics_average: "macro"   # "macro" / "weighted"
