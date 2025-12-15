@@ -4,16 +4,6 @@ preprocess_chinese.py
 
 Config-driven preprocessing pipeline for Chinese AD text data (text only).
 
-Steps
------
-1) NCMMSC ASR CSV → NCMMSC JSONL (unified schema)
-2) Merge JSONL corpora (only include files that exist)
-3) Normalize diagnosis labels + remove English rows
-4) Text cleaning (single point)
-5) Subset selection (dataset/labels/balancing/cap) – YAML-driven
-6) Length-based outlier filtering (per Diagnosis: mean ± std_k * std) – YAML-driven
-7) Stratified train/test split → JSONL – YAML-driven
-
 Single source of truth
 ----------------------
 All paths & numeric knobs come from `config_text.yaml`:
@@ -27,6 +17,8 @@ CLI only controls:
     --skip-asr reuse existing NCMMSC JSONL
 """
 
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,7 +29,8 @@ from sklearn.model_selection import train_test_split
 from collection import JSONLCombiner
 from dataset_subset import apply_subset
 from text_cleaning import clean_asr_chinese, clean_structured_chinese
-from config_utils import get_asr_config, get_text_config
+from config_utils import load_text_config, get_asr_config, get_text_config
+from enums import ADType
 
 NCMMSC_DATASET_NAME = "NCMMSC2021_AD_Competition"
 PREDICTIVE_DATASET_NAME = "Chinese_predictive_challenge"
@@ -46,12 +39,10 @@ TAUKADIAL_DATASET_NAME = "TAUKADIAL"
 # =====================================================================
 # Config helpers (strict)
 # =====================================================================
-
 def _require(cfg: Dict[str, Any], key: str) -> Any:
     if key not in cfg:
         raise KeyError(f"Config missing required key: {key}")
     return cfg[key]
-
 
 def _get_length_filter_cfg(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
     lf = _require(text_cfg, "length_filter")
@@ -59,7 +50,6 @@ def _get_length_filter_cfg(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("text.length_filter must be a dict.")
     _require(lf, "std_k")
     return lf
-
 
 def _get_split_cfg(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
     sp = _require(text_cfg, "split")
@@ -82,9 +72,7 @@ def _select_asr_text_column(df: pd.DataFrame) -> str:
         return "cleaned_transcript"
     raise ValueError("ASR CSV must contain 'transcript' (preferred) or 'cleaned_transcript'.")
 
-
 def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str) -> str:
-    """Convert NCMMSC ASR CSV to JSONL with unified schema."""
     csv_path_p = Path(csv_path)
     jsonl_path_p = Path(jsonl_path)
 
@@ -112,13 +100,16 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str) -> str:
     return str(jsonl_path_p)
 
 # =====================================================================
-# Step 2  Merge JSONLs (only existing)
+# Step 2  Merge JSONLs (only existing, honor target_datasets)
 # =====================================================================
 def _collect_existing_jsonls(
-    candidates: List[Tuple[str, Optional[str]]]
+    candidates: List[Tuple[str, Optional[str]]],
+    target_set: Optional[set],
 ) -> List[str]:
     files: List[str] = []
-    for _, path_str in candidates:
+    for dataset_name, path_str in candidates:
+        if target_set is not None and dataset_name not in target_set:
+            continue
         if not path_str:
             continue
         p = Path(path_str)
@@ -135,10 +126,13 @@ def combine_jsonls(
     taukadial_jsonl: Optional[str],
     output_dir: str,
     merged_name: str,
+    text_cfg: Dict[str, Any],
 ) -> str:
-    """Merge corpora into a single JSONL (include only files that exist)."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    target_datasets = text_cfg.get("target_datasets", None)
+    target_set = set(target_datasets) if isinstance(target_datasets, list) else None
 
     candidates: List[Tuple[str, Optional[str]]] = [
         (NCMMSC_DATASET_NAME, ncmmsc_jsonl),
@@ -146,9 +140,9 @@ def combine_jsonls(
         (TAUKADIAL_DATASET_NAME, taukadial_jsonl),
     ]
 
-    input_files = _collect_existing_jsonls(candidates)
+    input_files = _collect_existing_jsonls(candidates, target_set=target_set)
     if not input_files:
-        raise FileNotFoundError("No input JSONL files found for merging (check config paths).")
+        raise FileNotFoundError("No input JSONL files found for merging (check config paths / target_datasets).")
 
     print("[INFO] Combining JSONL files:")
     for f in input_files:
@@ -162,54 +156,66 @@ def combine_jsonls(
     return str(merged_path)
 
 # =====================================================================
-# Step 3–6 Load + normalize + clean + subset + length filter#  
+# Step 3–6  Load + normalize + dedup + clean + subset + length filter
 # =====================================================================
 def remove_english_rows(df: pd.DataFrame) -> pd.DataFrame:
     if "Languages" not in df.columns:
         return df
     return df[df["Languages"] != "en"]
 
+def dedup_records(df: pd.DataFrame) -> pd.DataFrame:
+    """Paper-strict: drop duplicated (Dataset, ID) if both columns exist."""
+    if df is None or df.empty:
+        return df
+    if "Dataset" in df.columns and "ID" in df.columns:
+        dup = int(df.duplicated(subset=["Dataset", "ID"]).sum())
+        if dup > 0:
+            print(f"[WARN] Found {dup} duplicated rows by (Dataset, ID) → keep first occurrence.")
+            df = df.drop_duplicates(subset=["Dataset", "ID"], keep="first")
+    return df.reset_index(drop=True)
+
+def _map_diagnosis_any(x: Any) -> str:
+    try:
+        return ADType.from_any(None if x is None else str(x)).value
+    except Exception:
+        return "Unknown"
 
 def normalize_diagnosis_labels(df: pd.DataFrame) -> pd.DataFrame:
     if "Diagnosis" not in df.columns:
         raise ValueError("Expected column 'Diagnosis' not found.")
     out = df.copy()
-    # Drop Unknown
+    out["Diagnosis"] = out["Diagnosis"].apply(_map_diagnosis_any)
+
     if (out["Diagnosis"] == "Unknown").any():
         unk = out[out["Diagnosis"] == "Unknown"]
         print("[WARN] Found Diagnosis == 'Unknown'. Datasets:", set(unk.get("Dataset", [])))
         out = out[out["Diagnosis"] != "Unknown"]
-    # NC/CTRL → HC
-    out["Diagnosis"] = out["Diagnosis"].replace({"NC": "HC", "CTRL": "HC"})
-    return out
 
+    return out.reset_index(drop=True)
 
 def clean_text_column(df: pd.DataFrame) -> pd.DataFrame:
     if "Text_interviewer_participant" not in df.columns:
         raise ValueError("Expected column 'Text_interviewer_participant' not found.")
     out = df.copy()
-    # single cleaning point: ASR-level light clean → structured clean
+
+    # single cleaning point (pipeline-level):
     out["Text_interviewer_participant"] = out["Text_interviewer_participant"].apply(clean_asr_chinese)
     out["Text_interviewer_participant"] = out["Text_interviewer_participant"].apply(clean_structured_chinese)
     return out
 
-
-def length_filter(
-    df: pd.DataFrame,
-    *,
-    std_k: float,
-) -> pd.DataFrame:
+def length_filter(df: pd.DataFrame, *, std_k: float) -> pd.DataFrame:
     if df.empty:
         return df
+
+    if std_k < 0:
+        raise ValueError("text.length_filter.std_k must be >= 0.")
 
     out = df.copy()
     out["length"] = out["Text_interviewer_participant"].apply(len)
 
     stats = out.groupby("Diagnosis")["length"].agg(["min", "max", "mean", "std"])
-    print("[INFO] Length stats by Diagnosis:\n", stats)
-
-    # std could be NaN if class has 1 sample
     stats["std"] = stats["std"].fillna(0.0)
+    print("[INFO] Length stats by Diagnosis:\n", stats)
 
     merged = out.merge(
         stats[["mean", "std"]],
@@ -229,14 +235,10 @@ def length_filter(
         print("[INFO] Label distribution after filtering:\n", filtered["Diagnosis"].value_counts())
     return filtered
 
-
-def load_and_process_chinese(
-    merged_jsonl_path: str,
-    text_cfg: Dict[str, Any],
-) -> pd.DataFrame:
-    """Load merged JSONL and run Steps 3–6."""
+def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -> pd.DataFrame:
     df = pd.read_json(Path(merged_jsonl_path), lines=True)
 
+    df = dedup_records(df)
     df = normalize_diagnosis_labels(df)
     df = remove_english_rows(df)
     df = clean_text_column(df)
@@ -251,19 +253,17 @@ def load_and_process_chinese(
         return df.reset_index(drop=True)
 
     lf_cfg = _get_length_filter_cfg(text_cfg)
-    std_k = float(lf_cfg["std_k"])
-    return length_filter(df, std_k=std_k)
-
+    return length_filter(df, std_k=float(lf_cfg["std_k"]))
 
 # =====================================================================
-# Step 7: Split + save (YAML-driven)
+# Step 7  Split + save (YAML-driven)
 # =====================================================================
-
 def _validate_split_feasibility(df: pd.DataFrame, min_per_class: int) -> None:
     if df.empty:
         raise ValueError("No samples to split (df is empty).")
     if "Diagnosis" not in df.columns:
         raise ValueError("Expected column 'Diagnosis' not found.")
+
     vc = df["Diagnosis"].value_counts()
     if vc.size < 2:
         raise ValueError(f"Need at least 2 classes for stratified split, got: {list(vc.index)}")
@@ -309,8 +309,10 @@ def run_chinese_preprocessing(
     config_path: Optional[str] = None,
     skip_asr: bool = False,
 ) -> Tuple[str, str]:
-    asr_cfg = get_asr_config(path=config_path)
-    text_cfg = get_text_config(path=config_path)
+    # Strict: load YAML once
+    cfg = load_text_config(config_path)
+    asr_cfg = get_asr_config(cfg=cfg)
+    text_cfg = get_text_config(cfg=cfg)
 
     # required text keys (strict)
     ncmmsc_jsonl = _require(text_cfg, "ncmmsc_jsonl")
@@ -333,6 +335,7 @@ def run_chinese_preprocessing(
         taukadial_jsonl=text_cfg.get("taukadial_jsonl"),
         output_dir=output_dir,
         merged_name=merged_name,
+        text_cfg=text_cfg,
     )
 
     # Step 3–6
@@ -354,8 +357,15 @@ def run_chinese_preprocessing(
 # CLI
 # =====================================================================
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Preprocess Chinese AD datasets (text only) – config-driven.")
-    parser.add_argument("--config",type=str,default=None,help="Path to config_text.yaml（預設：專案根目錄的 config_text.yaml）",)
+    parser = argparse.ArgumentParser(
+        description="Preprocess Chinese AD datasets (text only) – config-driven."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to config_text.yaml（預設：專案根目錄的 config_text.yaml）",
+    )
     parser.add_argument("--skip-asr",action="store_true",help="Skip ASR CSV→JSONL step and reuse existing NCMMSC JSONL.",)
     return parser
 
