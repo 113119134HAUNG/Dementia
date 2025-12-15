@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-enums.py (paper-strict)
+enums.py (paper-strict, converged)
 
 Canonical enums used across ASR, preprocessing, and modeling.
 
@@ -9,10 +9,11 @@ Diagnosis labels (3-way):
   - HC
   - MCI
 
-NOTE
-----
-Make ADType.from_any() the single source of truth for label normalization.
-Avoid duplicating label_map rules in YAML and in code.
+Policy
+------
+- ADType.from_any() is the canonical normalization for common label variants.
+- YAML text.label_map is allowed ONLY as a dataset-specific override layer
+  (e.g., if a dataset has unusual labels not covered by ADType).
 """
 
 from __future__ import annotations
