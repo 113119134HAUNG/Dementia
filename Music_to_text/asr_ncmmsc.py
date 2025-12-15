@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-asr_ncmmsc.py (paper-strict, single-point cleaning)
+asr_ncmmsc.py (paper-strict, single-point cleaning, converged)
 
 - YAML is the single source of truth (load once).
 - Deterministic file discovery order.
 - sample_id avoids duplicated label prefix.
 - ASR writes RAW transcript only (NO cleaning).
   All cleaning happens later in preprocess_chinese.py (single point).
+- paper-strict: if no audio files found, fail-fast.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ try:
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
+
 
 LABEL_DIRS: Dict[str, str] = {"AD": "AD", "HC": "HC", "MCI": "MCI"}
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
@@ -54,7 +56,7 @@ def iter_audio_files(
             continue
 
         audio_dir = data_root / LABEL_DIRS[label]
-        if not audio_dir.is_dir():
+       if not audio_dir.is_dir():
             print(f"[WARN] Missing directory, skip: {audio_dir}")
             continue
 
@@ -84,7 +86,7 @@ def run_ncmmsc_asr(
     labels: Optional[List[str]] = None,
     cap_per_label: Optional[int] = None,
 ) -> None:
-    cfg = load_text_config(config_path)       # load once
+    cfg = load_text_config(config_path)  # load once
     asr_cfg = get_asr_config(cfg=cfg)
 
     data_root = Path(asr_cfg["data_root"])
@@ -102,6 +104,8 @@ def run_ncmmsc_asr(
 
     files = list(iter_audio_files(data_root, labels=labels, cap_per_label=cap_per_label))
     print(f"[INFO] Found {len(files)} audio files under {data_root}")
+    if len(files) == 0:
+        raise FileNotFoundError(f"No audio files found under: {data_root}")
 
     decode_kwargs = build_decode_kwargs(asr_cfg)
     if initial_prompt:
@@ -144,6 +148,7 @@ def run_ncmmsc_asr(
         fp.close()
 
     print(f"\n[INFO] Done. Saved {len(files)} rows to {output_csv} (ok={ok_count}, error={err_count})")
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
