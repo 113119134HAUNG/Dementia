@@ -18,15 +18,14 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from faster_whisper import WhisperModel
 
-from asr_io import open_asr_csv_writer, write_asr_row
-from config_utils import load_text_config, get_asr_config
+from tools.asr_io import open_asr_csv_writer, write_asr_row
+from tools.config_utils import load_text_config, get_asr_config
 
 try:
     from tqdm.auto import tqdm
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
-
 
 LABEL_DIRS: Dict[str, str] = {"AD": "AD", "HC": "HC", "MCI": "MCI"}
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
@@ -56,7 +55,7 @@ def iter_audio_files(
             continue
 
         audio_dir = data_root / LABEL_DIRS[label]
-       if not audio_dir.is_dir():
+        if not audio_dir.is_dir():
             print(f"[WARN] Missing directory, skip: {audio_dir}")
             continue
 
@@ -148,7 +147,6 @@ def run_ncmmsc_asr(
         fp.close()
 
     print(f"\n[INFO] Done. Saved {len(files)} rows to {output_csv} (ok={ok_count}, error={err_count})")
-
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
