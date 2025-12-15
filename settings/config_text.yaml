@@ -1,17 +1,7 @@
 # =====================================================================
-# config_text.yaml
-#
-# Central configuration for:
-#   1. ASR on NCMMSC audio (Whisper)
-#   2. Predictive dataset preprocessing (TSV + eGeMAPS)
-#   3. Chinese text preprocessing & dataset merging
-#   4. Text features + classifiers + K-fold CV
-#      (TF-IDF / BERT / GloVe / Gemma)
+# config_text.yaml (single source of truth)
 # =====================================================================
 
-# ---------------------------------------------------------------------
-# Common shared values (single source of truth; reuse via YAML anchors)
-# ---------------------------------------------------------------------
 common:
   seed: &seed 42
 
@@ -20,21 +10,21 @@ common:
   length_std_k: &length_std_k 1.0
   min_per_class: &min_per_class 2
 
-  # modeling (logreg / seq length)
+  # modeling
   logreg_C: &logreg_C 1.0
   logreg_max_iter: &logreg_max_iter 1000
   max_seq_length: &max_seq_length 512
 
 # ---------------------------------------------------------------------
-#   ASR (audio → transcript CSV) – used by asr_ncmmsc.py
+# ASR (audio → transcript CSV)
 # ---------------------------------------------------------------------
 asr:
   data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
   output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
 
   model_size: "large-v2"
-  device: "cuda"            # "cuda" or "cpu"
-  compute_type: "float16"   # e.g. "float16", "int8_float16", ...
+  device: "cuda"
+  compute_type: "float16"
 
   initial_prompt: |-
     以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、
@@ -66,78 +56,75 @@ asr:
     without_timestamps: true
 
 # ---------------------------------------------------------------------
-#    Predictive dataset (TSV + eGeMAPS) – used by preprocess_predictive.py
+# Predictive dataset (TSV + eGeMAPS)
 # ---------------------------------------------------------------------
 predictive:
   meta_csv: "/content/predictive/2_final_list_train.csv"
   egemaps_csv: "/content/predictive/egemaps_final.csv"
   tsv_root: "/content/predictive/tsv"
-  output_text_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
+
+  output_text_jsonl: &predictive_jsonl "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
   output_egemaps_csv: "/content/predictive_egemaps_features.csv"
 
-  # optional TSV parsing knobs (so code doesn't hardcode)
+  dataset_name: "Chinese_predictive_challenge"
+
   tsv:
     keep_speakers: null      # e.g. ["<B>"] ; null = keep all
     drop_silence: true       # drop rows where value == "sil"
     order_by: "no"           # "no" | "start_time" | null
 
-  dataset_name: "Chinese_predictive_challenge"
-
 # ---------------------------------------------------------------------
-#    Text preprocessing & dataset merging – used by preprocess_chinese.py
+# Text preprocessing & dataset merging
 # ---------------------------------------------------------------------
 text:
-  # Inputs
-  ncmmsc_jsonl: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
-  predictive_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
-  taukadial_jsonl: null      # optional; set a path if available
+  # NCMMSC JSONL output from ASR CSV (single truth)
+  ncmmsc_jsonl: &ncmmsc_jsonl "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
 
-  # Outputs
   output_dir: "/content/chinese_combined"
-  combined_name: "Chinese_NCMMSC_iFlyTek.jsonl"
+  combined_name: "Chinese_Combined.jsonl"
   train_jsonl: "train_chinese.jsonl"
   test_jsonl: "test_chinese.jsonl"
 
-  # Merge candidates (strict mapping: dataset name ↔ file path)
+  # Merge candidates (ONLY this list is used to merge; no duplicate path keys)
   corpora:
     - name: "NCMMSC2021_AD_Competition"
-      path: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
+      path: *ncmmsc_jsonl
     - name: "Chinese_predictive_challenge"
-      path: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
+      path: *predictive_jsonl
     - name: "TAUKADIAL"
       path: null
 
-  # Subset rules (single source of truth)
+  # Subset rules (ONLY applied once in dataset_subset.apply_subset)
   target_datasets: ["NCMMSC2021_AD_Competition"]
   target_labels: ["AD", "HC"]
   balance: true
   subset_seed: *seed
   cap_per_class: 300
 
-  # Label normalization (single source of truth)
+  # Label normalization (config-driven)
   label_map:
     NC: "HC"
     CTRL: "HC"
     CONTROL: "HC"
 
-  # Language filtering
+  # Language filtering (config-driven)
   language_filter:
     drop_languages: ["en"]
 
-  # Length-based outlier filter
+  # Length-based outlier filter (config-driven)
   length_filter:
     enabled: true
-    std_k: *length_std_k      # keep within mean ± std_k * std
+    std_k: *length_std_k
 
-  # Train/test split
+  # Train/test split (config-driven)
   split:
     test_size: *split_test_size
     random_state: *seed
     stratify: true
     min_per_class: *min_per_class
-  
+
 # ---------------------------------------------------------------------
-#    Text features + classifiers + K-fold cross-validation
+# Features (unchanged)
 # ---------------------------------------------------------------------
 features:
   method: "bert"
@@ -150,13 +137,11 @@ features:
       stop_words: null
       min_df: 1
       max_df: 1.0
-
     transformer:
       use_idf: true
       smooth_idf: true
       norm: "l2"
       sublinear_tf: false
-
     logreg:
       C: *logreg_C
       class_weight: "balanced"
@@ -169,7 +154,6 @@ features:
     pooling: "mean"
     max_seq_length: *max_seq_length
     device: "cuda"
-
     logreg:
       C: *logreg_C
       class_weight: "balanced"
@@ -184,7 +168,6 @@ features:
     remove_stopwords: true
     stopwords_lang: "english"
     pooling: "sum_l2norm"
-
     logreg:
       C: *logreg_C
       class_weight: "balanced"
@@ -199,7 +182,6 @@ features:
     padding: "longest"
     truncation: true
     device: "cuda"
-
     logreg:
       C: *logreg_C
       class_weight: "balanced"
