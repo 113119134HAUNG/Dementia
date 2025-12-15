@@ -21,7 +21,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 
 from tools.config_utils import load_text_config, get_text_config, get_features_config
@@ -39,7 +38,6 @@ from paper.cv_eval import (
     evaluate_with_precomputed_folds,
     evaluate_tfidf_trainonly,
 )
-
 
 def run_evaluate_cv(
     config_path: Optional[str] = None,
@@ -76,6 +74,7 @@ def run_evaluate_cv(
     metrics_output = Path(str(require(cv_cfg, "metrics_output", where="features.crossval")))
     print_report = bool(cv_cfg.get("print_classification_report", True))
     print_cm = bool(cv_cfg.get("print_confusion_matrix", True))
+    print_method_summary = bool(cv_cfg.get("print_method_summary", True))
 
     # method selection
     methods_yaml = norm_str_list(cv_cfg.get("methods")) or ["tfidf", "bert", "glove", "gemma"]
@@ -200,11 +199,16 @@ def run_evaluate_cv(
             glove_cfg = get_dict(feat_cfg, "glove", where="features")
             emb_path = str(require(glove_cfg, "embeddings_path", where="features.glove"))
             emb_dim = int(require(glove_cfg, "embedding_dim", where="features.glove"))
-            lowercase = bool(glove_cfg.get("lowercase", True))
-            remove_stopwords = bool(glove_cfg.get("remove_stopwords", True))
+            lowercase = bool(glove_cfg.get("lowercase", False))
+            remove_stopwords = bool(glove_cfg.get("remove_stopwords", False))
             stopwords_lang = glove_cfg.get("stopwords_lang", None)
             pooling = str(glove_cfg.get("pooling", "sum_l2norm"))
             logreg_cfg = get_dict(glove_cfg, "logreg", where="features.glove")
+
+            # NEW (Chinese-ready)
+            tokenizer = str(glove_cfg.get("tokenizer", "whitespace")).strip().lower()
+            max_words = glove_cfg.get("max_words", None)
+            max_words_i = None if max_words is None else int(max_words)
 
             X_all = glove_embeddings_all(
                 X_text,
@@ -214,6 +218,8 @@ def run_evaluate_cv(
                 remove_stopwords=remove_stopwords,
                 stopwords_lang=None if stopwords_lang is None else str(stopwords_lang),
                 pooling=pooling,
+                tokenizer=tokenizer,
+                max_words=max_words_i,
             )
 
             results["methods"]["glove"] = evaluate_with_precomputed_folds(
@@ -262,12 +268,13 @@ def run_evaluate_cv(
         else:
             raise ValueError(f"Unknown method: {method!r} (allowed: tfidf, bert, glove, gemma)")
 
-        sm = results["methods"][m]["summary"]
-        print(f"\n[Summary] {m.upper()}  (mean ± std)")
-        print(f"  Accuracy : {sm['accuracy_mean']:.4f} ± {sm['accuracy_std']:.4f}")
-        print(f"  Precision: {sm['precision_mean']:.4f} ± {sm['precision_std']:.4f}")
-        print(f"  Recall   : {sm['recall_mean']:.4f} ± {sm['recall_std']:.4f}")
-        print(f"  F1       : {sm['f1_mean']:.4f} ± {sm['f1_std']:.4f}")
+        if print_method_summary:
+            sm = results["methods"][m]["summary"]
+            print(f"\n[Summary] {m.upper()}  (mean ± std)")
+            print(f"  Accuracy : {sm['accuracy_mean']:.4f} ± {sm['accuracy_std']:.4f}")
+            print(f"  Precision: {sm['precision_mean']:.4f} ± {sm['precision_std']:.4f}")
+            print(f"  Recall   : {sm['recall_mean']:.4f} ± {sm['recall_std']:.4f}")
+            print(f"  F1       : {sm['f1_mean']:.4f} ± {sm['f1_std']:.4f}")
 
     ensure_parent(metrics_output)
     metrics_output.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -275,11 +282,19 @@ def run_evaluate_cv(
     return str(metrics_output)
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Paper-style 5-fold CV evaluator (clean; YAML-driven).")
+    p = argparse.ArgumentParser(description="Paper-style K-fold CV evaluator (YAML-driven).")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
     p.add_argument("--methods", nargs="+", default=None, help="Override methods: tfidf bert glove gemma")
     p.add_argument("--reuse-folds", action="store_true", help="Reuse existing folds indices JSON.")
     return p
 
 def cli_main() -> None:
-    args = build_arg_parser().parse
+    args = build_arg_parser().parse_args()
+    run_evaluate_cv(
+        config_path=args.config,
+        methods_override=None if args.methods is None else [str(x).strip() for x in args.methods],
+        reuse_folds=bool(args.reuse_folds),
+    )
+
+if __name__ == "__main__":
+    cli_main()
