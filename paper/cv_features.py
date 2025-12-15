@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-cv_features.py
+paper/cv_features.py
 
 Feature extraction only:
 - TF-IDF
-- BERT sentence embeddings
+- BERT sentence embeddings (mean / CLS / last-N-layers concat + mean)
 - GloVe/fastText-style static word embeddings (sentence embedding)
 - Gemma sentence embeddings
 """
@@ -16,9 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# ============================================================
-# TF-IDF
-# ============================================================
+
 def tfidf_features_all(
     X: Sequence[str],
     *,
@@ -33,7 +31,6 @@ def tfidf_features_all(
     counts = vect.fit_transform(X)
     mat = tfidf.fit_transform(counts)
     return mat.toarray()
-
 
 def tfidf_features_fold_fit(
     X_train: Sequence[str],
@@ -51,23 +48,15 @@ def tfidf_features_fold_fit(
     Xte = tfidf.transform(vect.transform(X_test)).toarray()
     return Xtr, Xte
 
-# ============================================================
-# Helpers: mask-aware mean pooling
-# ============================================================
-def _masked_mean_pool(last_hidden_state, attention_mask):
-    """
-    last_hidden_state: (B, T, H)
-    attention_mask:    (B, T) 1 for tokens, 0 for padding
-    """
-    # (B, T, 1)
-    mask = attention_mask.unsqueeze(-1).to(last_hidden_state.dtype)
-    summed = (last_hidden_state * mask).sum(dim=1)  # (B, H)
-    denom = mask.sum(dim=1).clamp(min=1.0)          # (B, 1)
+def _masked_mean(last_hidden: "np.ndarray", attention_mask: "np.ndarray") -> "np.ndarray":
+    # last_hidden: (B,T,H), mask: (B,T)
+    mask = attention_mask.astype(np.float32)
+    mask = mask[:, :, None]  # (B,T,1)
+    summed = (last_hidden * mask).sum(axis=1)
+    denom = mask.sum(axis=1)
+    denom = np.clip(denom, 1e-6, None)
     return summed / denom
 
-# ============================================================
-# BERT sentence embeddings
-# ============================================================
 def bert_embeddings_all(
     X: Sequence[str],
     *,
@@ -75,13 +64,18 @@ def bert_embeddings_all(
     max_seq_length: int,
     device: str,
     batch_size: int,
-    pooling: str = "mean",
+    embedding_strategy: str = "mean",   # mean | cls | last4_concat_mean
+    last_n_layers: int = 4,            # for last4_concat_mean
 ) -> np.ndarray:
     try:
         import torch
         from transformers import AutoTokenizer, AutoModel
     except Exception as e:  # noqa: BLE001
         raise ImportError("BERT evaluation requires torch + transformers installed.") from e
+
+    strat = (embedding_strategy or "mean").strip().lower()
+    if strat not in ("mean", "cls", "last4_concat_mean"):
+        raise ValueError("features.bert.embedding_strategy must be one of: mean | cls | last4_concat_mean")
 
     tok = AutoTokenizer.from_pretrained(model_name)
     mdl = AutoModel.from_pretrained(model_name)
@@ -92,10 +86,9 @@ def bert_embeddings_all(
 
     out_list: List[np.ndarray] = []
     bs = max(1, int(batch_size))
+    ln = max(1, int(last_n_layers))
 
-    pooling = (pooling or "mean").strip().lower()
-    if pooling != "mean":
-        raise ValueError("features.bert.pooling supports only: 'mean' (paper-aligned).")
+    need_hidden = (strat == "last4_concat_mean")
 
     for i in range(0, len(X), bs):
         batch = X[i : i + bs]
@@ -110,22 +103,33 @@ def bert_embeddings_all(
         enc = {k: v.to(dev) for k, v in enc.items()}
 
         with torch.no_grad():
-            outputs = mdl(**enc)
-            last = outputs.last_hidden_state  # (B, T, H)
-            attn = enc.get("attention_mask", None)
-            if attn is None:
-                # fallback (should not happen for HF tokenizers)
-                sent = last.mean(dim=1)
+            if need_hidden:
+                outputs = mdl(**enc, output_hidden_states=True)
+                hs = outputs.hidden_states  # tuple: (emb, l1, ..., lL)
+                if hs is None or len(hs) < (ln + 1):
+                    raise ValueError("BERT did not return enough hidden_states for last4_concat_mean.")
+                last4 = torch.cat(hs[-ln:], dim=-1)  # (B,T,H*ln)
+                last_np = last4.detach().cpu().numpy()
             else:
-                sent = _masked_mean_pool(last, attn)
+                outputs = mdl(**enc)
+                last = outputs.last_hidden_state  # (B,T,H)
+                last_np = last.detach().cpu().numpy()
 
-        out_list.append(sent.detach().cpu().numpy())
+            att = enc.get("attention_mask")
+            att_np = att.detach().cpu().numpy() if att is not None else None
+
+            if strat == "cls":
+                sent = last_np[:, 0, :]  # (B,H)
+            else:
+                if att_np is None:
+                    sent = last_np.mean(axis=1)
+                else:
+                    sent = _masked_mean(last_np, att_np)
+
+        out_list.append(sent.astype(np.float32))
 
     return np.concatenate(out_list, axis=0)
 
-# ============================================================
-# Gemma sentence embeddings
-# ============================================================
 def gemma_embeddings_all(
     X: Sequence[str],
     *,
@@ -141,8 +145,11 @@ def gemma_embeddings_all(
     except Exception as e:  # noqa: BLE001
         raise ImportError("Gemma evaluation requires torch + transformers installed.") from e
 
+    pool = (pooling or "mean").strip().lower()
+    if pool != "mean":
+        raise ValueError("features.gemma.pooling supports only: 'mean' (paper-aligned).")
+
     tok = AutoTokenizer.from_pretrained(model_name)
-    # Some decoder-only tokenizers have no pad token
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
@@ -154,10 +161,6 @@ def gemma_embeddings_all(
 
     out_list: List[np.ndarray] = []
     bs = max(1, int(batch_size))
-
-    pooling = (pooling or "mean").strip().lower()
-    if pooling != "mean":
-        raise ValueError("features.gemma.pooling supports only: 'mean' (paper-aligned).")
 
     for i in range(0, len(X), bs):
         batch = X[i : i + bs]
@@ -173,20 +176,20 @@ def gemma_embeddings_all(
 
         with torch.no_grad():
             outputs = mdl(**enc)
-            last = outputs.last_hidden_state  # (B, T, H)
-            attn = enc.get("attention_mask", None)
-            if attn is None:
-                sent = last.mean(dim=1)
-            else:
-                sent = _masked_mean_pool(last, attn)
+            last = outputs.last_hidden_state  # (B,T,H)
+            last_np = last.detach().cpu().numpy()
+            att = enc.get("attention_mask")
+            att_np = att.detach().cpu().numpy() if att is not None else None
 
-        out_list.append(sent.detach().cpu().numpy())
+            if att_np is None:
+                sent = last_np.mean(axis=1)
+            else:
+                sent = _masked_mean(last_np, att_np)
+
+        out_list.append(sent.astype(np.float32))
 
     return np.concatenate(out_list, axis=0)
 
-# ============================================================
-# Static word vectors sentence embeddings (GloVe / fastText .vec)
-# ============================================================
 def glove_embeddings_all(
     X: Sequence[str],
     *,
@@ -196,30 +199,19 @@ def glove_embeddings_all(
     remove_stopwords: bool,
     stopwords_lang: Optional[str],
     pooling: str,
-    tokenizer: str = "whitespace",          # "jieba" | "char" | "whitespace"
+    tokenizer: str = "whitespace",          # jieba | char | whitespace
     max_words: Optional[int] = None,        # cap vocab for RAM safety
 ) -> np.ndarray:
     """
     Sentence embeddings from static word vectors (GloVe/fastText .vec-like).
 
-    Notes
-    -----
-    - Supports fastText .vec header: first line "N D" will be skipped automatically.
-    - For Chinese, prefer tokenizer="jieba" (recommended) or tokenizer="char".
-      tokenizer="whitespace" usually yields near-all OOV for Chinese transcripts.
-    - pooling (paper-aligned): only "sum_l2norm"
+    Chinese note:
+      - Use tokenizer="jieba" (recommended) or tokenizer="char".
+      - tokenizer="whitespace" usually yields near-all OOV for Chinese transcripts.
     """
     p = Path(embeddings_path)
     if not p.exists():
         raise FileNotFoundError(f"Embeddings file not found: {p}")
-
-    pooling = (pooling or "sum_l2norm").strip().lower()
-    if pooling != "sum_l2norm":
-        raise ValueError("features.glove.pooling must be 'sum_l2norm' (paper-aligned).")
-
-    dim = int(embedding_dim)
-    if dim <= 0:
-        raise ValueError("features.glove.embedding_dim must be > 0.")
 
     # stopwords (optional; no downloads)
     stop: set = set()
@@ -237,46 +229,30 @@ def glove_embeddings_all(
     if tok_mode not in ("whitespace", "jieba", "char"):
         raise ValueError("features.glove.tokenizer must be one of: 'whitespace', 'jieba', 'char'.")
 
-    # Cap vocab size to avoid RAM explosion
+    jieba_mod = None
+    if tok_mode == "jieba":
+        try:
+            import jieba as jieba_mod  # type: ignore
+        except Exception as e:
+            raise ImportError("glove.tokenizer='jieba' requires: pip install jieba") from e
+
+    emb: Dict[str, np.ndarray] = {}
+    dim = int(embedding_dim)
+
     mw = None if max_words is None else max(0, int(max_words))
-    if mw == 0:
-        # explicit: load none
-        emb: Dict[str, np.ndarray] = {}
-    else:
-        emb = {}
-        loaded = 0
+    loaded = 0
 
-        def _is_fasttext_header(parts: List[str]) -> bool:
-            # fastText .vec often starts with: "<n_words> <dim>"
-            if len(parts) != 2:
-                return False
-            return parts[0].isdigit() and parts[1].isdigit()
-
-        with p.open("r", encoding="utf-8", errors="ignore") as f:
-            first = True
-            for line in f:
-                parts = line.rstrip().split()
-                if not parts:
-                    continue
-
-                # Skip header line if present
-                if first:
-                    first = False
-                    if _is_fasttext_header(parts):
-                        continue
-
-                if len(parts) < (1 + dim):
-                    continue
-
-                w = parts[0]
-                try:
-                    vec = np.asarray(parts[1 : 1 + dim], dtype=np.float32)
-                except Exception:
-                    continue
-
-                if vec.shape[0] != dim:
-                    continue
-
+    with p.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.rstrip().split()
+            if len(parts) < (1 + dim):
+                continue  # also skips header like: "2000000 300"
+            w = parts[0]
+            try:
+                vec = np.asarray(parts[1 : 1 + dim], dtype=np.float32)
+            except Exception:
+                continue
+            if vec.shape[0] == dim:
                 emb[w] = vec
                 loaded += 1
                 if mw is not None and loaded >= mw:
@@ -290,11 +266,7 @@ def glove_embeddings_all(
             s = s.lower()
 
         if tok_mode == "jieba":
-            try:
-                import jieba  # type: ignore
-            except Exception as e:
-                raise ImportError("glove.tokenizer='jieba' requires: pip install jieba") from e
-            toks = [t.strip() for t in jieba.lcut(s) if t.strip()]
+            toks = [t.strip() for t in jieba_mod.lcut(s) if t.strip()]  # type: ignore[union-attr]
         elif tok_mode == "char":
             toks = [ch for ch in s if not ch.isspace()]
         else:
@@ -304,11 +276,12 @@ def glove_embeddings_all(
             toks = [t for t in toks if t not in stop]
         return toks
 
+    pool = (pooling or "sum_l2norm").strip().lower()
+    if pool != "sum_l2norm":
+        raise ValueError("features.glove.pooling must be 'sum_l2norm' (paper-aligned).")
+
     def _sent_vec(s: str) -> np.ndarray:
         toks = _tokenize(s)
-        if not toks:
-            return np.zeros(dim, dtype=np.float32)
-
         vecs: List[np.ndarray] = []
         for t in toks:
             v = emb.get(t)
@@ -320,7 +293,6 @@ def glove_embeddings_all(
 
         mat = np.stack(vecs, axis=0)
         summed = mat.sum(axis=0)
-
         denom = float(np.sqrt(np.sum(summed * summed))) or 1.0
         return (summed / denom).astype(np.float32)
 
