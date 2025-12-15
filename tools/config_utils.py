@@ -15,6 +15,8 @@ Config structure (expected top-level keys)
 - features   : Text feature extraction + classifiers + cross-validation
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -26,7 +28,6 @@ DEFAULT_CONFIG_PATH = Path("config_text.yaml")
 # =====================================================================
 # Core loader
 # =====================================================================
-
 def load_text_config(path: Optional[str] = None) -> Dict[str, Any]:
     """Load the full configuration dictionary from a YAML file.
 
@@ -41,10 +42,10 @@ def load_text_config(path: Optional[str] = None) -> Dict[str, Any]:
         A dictionary mapping top-level section names to their configs,
         e.g. {"asr": {...}, "predictive": {...}, "text": {...}, "features": {...}}.
     """
-    if path is None:
-        cfg_path = DEFAULT_CONFIG_PATH
-    else:
-        cfg_path = Path(path)
+    cfg_path = DEFAULT_CONFIG_PATH if path is None else Path(path)
+
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Config file not found: {cfg_path}")
 
     with cfg_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -57,92 +58,45 @@ def load_text_config(path: Optional[str] = None) -> Dict[str, Any]:
 # =====================================================================
 # Section accessors
 # =====================================================================
+def _get_section(
+    section: str,
+    cfg: Optional[Dict[str, Any]] = None,
+    path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Internal helper to fetch a top-level config section."""
+    if cfg is None:
+        cfg = load_text_config(path)
+    if section not in cfg:
+        raise KeyError(f"Config 檔缺少 '{section}' 區塊。")
+    sub = cfg[section]
+    if not isinstance(sub, dict):
+        raise ValueError(f"Config 區塊 '{section}' 格式錯誤，預期是 dict。")
+    return sub
 
 def get_asr_config(
     cfg: Optional[Dict[str, Any]] = None,
     path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return the 'asr' section of the config.
-
-    Parameters
-    ----------
-    cfg : dict or None
-        Already loaded config dictionary. If None, the YAML will be
-        loaded from ``path`` / DEFAULT_CONFIG_PATH.
-    path : str or None
-        Path to the YAML file (used only when cfg is None).
-
-    Raises
-    ------
-    KeyError
-        If the 'asr' section is missing.
-    """
-    if cfg is None:
-        cfg = load_text_config(path)
-    if "asr" not in cfg:
-        raise KeyError("Config 檔缺少 'asr' 區塊。")
-    return cfg["asr"]
+    """Return the 'asr' section of the config."""
+    return _get_section("asr", cfg=cfg, path=path)
 
 def get_predictive_config(
     cfg: Optional[Dict[str, Any]] = None,
     path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return the 'predictive' section of the config.
-
-    This section is intended for the predictive challenge dataset:
-        - meta CSV (uuid, label, demographics)
-        - eGeMAPS CSV
-        - TSV root directory
-        - output paths for text JSONL & eGeMAPS feature CSV
-
-    Parameters
-    ----------
-    cfg : dict or None
-        Already loaded config dictionary. If None, the YAML will be
-        loaded from ``path`` / DEFAULT_CONFIG_PATH.
-    path : str or None
-        Path to the YAML file (used only when cfg is None).
-
-    Raises
-    ------
-    KeyError
-        If the 'predictive' section is missing.
-    """
-    if cfg is None:
-        cfg = load_text_config(path)
-    if "predictive" not in cfg:
-        raise KeyError("Config 檔缺少 'predictive' 區塊。")
-    return cfg["predictive"]
+    """Return the 'predictive' section of the config."""
+    return _get_section("predictive", cfg=cfg, path=path)
 
 def get_text_config(
     cfg: Optional[Dict[str, Any]] = None,
     path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return the 'text' section of the config.
-
-    This section controls Chinese text preprocessing & dataset merging:
-        - paths for NCMMSC JSONL / predictive JSONL / optional TAUKADIAL JSONL
-        - output directory and filenames for merged / train / test JSONL
-    """
-    if cfg is None:
-        cfg = load_text_config(path)
-    if "text" not in cfg:
-        raise KeyError("Config 檔缺少 'text' 區塊。")
-    return cfg["text"]
+    """Return the 'text' section of the config."""
+    return _get_section("text", cfg=cfg, path=path)
 
 def get_features_config(
     cfg: Optional[Dict[str, Any]] = None,
     path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return the 'features' section of the config.
-
-    This section controls:
-        - which text feature method to run (tfidf / bert / glove / gemma)
-        - per-method hyper-parameters
-        - cross-validation settings
-    """
-    if cfg is None:
-        cfg = load_text_config(path)
-    if "features" not in cfg:
-        raise KeyError("Config 檔缺少 'features' 區塊。")
-    return cfg["features"]
+    """Return the 'features' section of the config."""
+    return _get_section("features", cfg=cfg, path=path)
