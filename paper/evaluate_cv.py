@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-evaluate_cv.py
+paper/evaluate_cv.py
 
 This file only:
 - reads YAML
@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from tools.config_utils import load_text_config, get_text_config, get_features_config
@@ -36,8 +37,9 @@ from paper.cv_features import (
 )
 from paper.cv_eval import (
     evaluate_with_precomputed_folds,
-    evaluate_tfidf_trainonly,  # 需要你在 cv_eval.py 補上（我下面有給）
+    evaluate_tfidf_trainonly,
 )
+
 
 def run_evaluate_cv(
     config_path: Optional[str] = None,
@@ -93,7 +95,7 @@ def run_evaluate_cv(
         save_folds_indices(folds, output_path=output_indices)
         print(f"[INFO] Saved fold indices to: {output_indices} (n_folds={len(folds)})")
 
-    # knobs
+    # runtime knobs
     default_bs = int(cv_cfg.get("batch_size", 8))
     bert_bs = int(cv_cfg.get("bert_batch_size", default_bs))
     gemma_bs = int(cv_cfg.get("gemma_batch_size", default_bs))
@@ -135,7 +137,9 @@ def run_evaluate_cv(
             if tfidf_fit_scope == "full":
                 X_all = tfidf_features_all(X_text, vectorizer_cfg=vect_cfg, transformer_cfg=trf_cfg)
                 res = evaluate_with_precomputed_folds(
-                    X_all, y, folds,
+                    X_all,
+                    y,
+                    folds,
                     logreg_cfg=logreg_cfg,
                     average=average,
                     zero_division=zero_division,
@@ -145,7 +149,6 @@ def run_evaluate_cv(
                     method_name="tfidf",
                 )
             else:
-                # train-only fitting per fold (moved to cv_eval to keep evaluate_cv clean)
                 res = evaluate_tfidf_trainonly(
                     X_text=X_text,
                     y=y,
@@ -181,7 +184,9 @@ def run_evaluate_cv(
             )
 
             results["methods"]["bert"] = evaluate_with_precomputed_folds(
-                X_all, y, folds,
+                X_all,
+                y,
+                folds,
                 logreg_cfg=logreg_cfg,
                 average=average,
                 zero_division=zero_division,
@@ -212,7 +217,9 @@ def run_evaluate_cv(
             )
 
             results["methods"]["glove"] = evaluate_with_precomputed_folds(
-                X_all, y, folds,
+                X_all,
+                y,
+                folds,
                 logreg_cfg=logreg_cfg,
                 average=average,
                 zero_division=zero_division,
@@ -240,7 +247,9 @@ def run_evaluate_cv(
             )
 
             results["methods"]["gemma"] = evaluate_with_precomputed_folds(
-                X_all, y, folds,
+                X_all,
+                y,
+                folds,
                 logreg_cfg=logreg_cfg,
                 average=average,
                 zero_division=zero_division,
@@ -273,12 +282,4 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 def cli_main() -> None:
-    args = build_arg_parser().parse_args()
-    run_evaluate_cv(
-        config_path=args.config,
-        methods_override=None if args.methods is None else [str(x).strip() for x in args.methods],
-        reuse_folds=bool(args.reuse_folds),
-    )
-
-if __name__ == "__main__":
-    cli_main()
+    args = build_arg_parser().parse
