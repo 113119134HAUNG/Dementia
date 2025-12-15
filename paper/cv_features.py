@@ -5,7 +5,7 @@ cv_features.py
 Feature extraction only:
 - TF-IDF
 - BERT sentence embeddings
-- GloVe sentence embeddings
+- GloVe/fastText-style static word embeddings (sentence embedding)
 - Gemma sentence embeddings
 """
 
@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-
 
 def tfidf_features_all(
     X: Sequence[str],
@@ -32,7 +31,6 @@ def tfidf_features_all(
     mat = tfidf.fit_transform(counts)
     return mat.toarray()
 
-
 def tfidf_features_fold_fit(
     X_train: Sequence[str],
     X_test: Sequence[str],
@@ -48,7 +46,6 @@ def tfidf_features_fold_fit(
     Xtr = tfidf.fit_transform(vect.fit_transform(X_train)).toarray()
     Xte = tfidf.transform(vect.transform(X_test)).toarray()
     return Xtr, Xte
-
 
 def bert_embeddings_all(
     X: Sequence[str],
@@ -99,7 +96,6 @@ def bert_embeddings_all(
         out_list.append(sent.detach().cpu().numpy())
 
     return np.concatenate(out_list, axis=0)
-
 
 def gemma_embeddings_all(
     X: Sequence[str],
@@ -154,7 +150,6 @@ def gemma_embeddings_all(
 
     return np.concatenate(out_list, axis=0)
 
-
 def glove_embeddings_all(
     X: Sequence[str],
     *,
@@ -164,10 +159,19 @@ def glove_embeddings_all(
     remove_stopwords: bool,
     stopwords_lang: Optional[str],
     pooling: str,
+    tokenizer: str = "whitespace",          # NEW: "jieba" | "char" | "whitespace"
+    max_words: Optional[int] = None,        # NEW: cap vocab for RAM safety
 ) -> np.ndarray:
+    """
+    Sentence embeddings from static word vectors (GloVe/fastText .vec-like).
+
+    Chinese note:
+      - Use tokenizer="jieba" (recommended) or tokenizer="char".
+      - tokenizer="whitespace" usually yields near-all OOV for Chinese transcripts.
+    """
     p = Path(embeddings_path)
     if not p.exists():
-        raise FileNotFoundError(f"GloVe embeddings file not found: {p}")
+        raise FileNotFoundError(f"Embeddings file not found: {p}")
 
     # stopwords (optional; no downloads)
     stop: set = set()
@@ -184,6 +188,10 @@ def glove_embeddings_all(
     emb: Dict[str, np.ndarray] = {}
     dim = int(embedding_dim)
 
+    # Cap vocab size to avoid RAM explosion
+    mw = None if max_words is None else max(0, int(max_words))
+
+    loaded = 0
     with p.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             parts = line.rstrip().split()
@@ -196,6 +204,13 @@ def glove_embeddings_all(
                 continue
             if vec.shape[0] == dim:
                 emb[w] = vec
+                loaded += 1
+                if mw is not None and loaded >= mw:
+                    break
+
+    tok_mode = (tokenizer or "whitespace").strip().lower()
+    if tok_mode not in ("whitespace", "jieba", "char"):
+        raise ValueError("features.glove.tokenizer must be one of: 'whitespace', 'jieba', 'char'.")
 
     def _tokenize(s: str) -> List[str]:
         s = (s or "").strip()
@@ -203,7 +218,18 @@ def glove_embeddings_all(
             return []
         if lowercase:
             s = s.lower()
-        toks = s.split()
+
+        if tok_mode == "jieba":
+            try:
+                import jieba  # type: ignore
+            except Exception as e:
+                raise ImportError("glove.tokenizer='jieba' requires: pip install jieba") from e
+            toks = [t.strip() for t in jieba.lcut(s) if t.strip()]
+        elif tok_mode == "char":
+            toks = [ch for ch in s if not ch.isspace()]
+        else:
+            toks = s.split()
+
         if remove_stopwords and stop:
             toks = [t for t in toks if t not in stop]
         return toks
