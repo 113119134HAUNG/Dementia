@@ -29,18 +29,13 @@ common:
 #   ASR (audio → transcript CSV) – used by asr_ncmmsc.py
 # ---------------------------------------------------------------------
 asr:
-  # Root directory of NCMMSC audio (contains AD / HC / MCI subfolders)
   data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
-
-  # Output ASR CSV (used later by text preprocessing)
   output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
 
-  # Whisper model settings
   model_size: "large-v2"
   device: "cuda"            # "cuda" or "cpu"
   compute_type: "float16"   # e.g. "float16", "int8_float16", ...
 
-  # Initial prompt for Whisper (Chinese clinical context)
   initial_prompt: |-
     以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、
     輕度認知障礙（MCI）與健康對照組（HC）的臨床訪談與語言測驗，
@@ -56,7 +51,6 @@ asr:
     對於 AD、MCI、HC 等縮寫，請以大寫英文字母保留。
     若有單字實在聽不清楚，請不要亂猜，可以以『[聽不清楚]』標示。
 
-  # Decoding hyper-parameters for Whisper (all model-side settings live here)
   decode:
     language: "zh"
     task: "transcribe"
@@ -75,79 +69,85 @@ asr:
 #    Predictive dataset (TSV + eGeMAPS) – used by preprocess_predictive.py
 # ---------------------------------------------------------------------
 predictive:
-  # Original meta file with labels and demographics
-  # (e.g., uuid, label, sex, age, education)
   meta_csv: "/content/predictive/2_final_list_train.csv"
-
-  # eGeMAPS feature table (one row per uuid)
   egemaps_csv: "/content/predictive/egemaps_final.csv"
-
-  # Directory containing per-utterance TSV transcripts (Pxxxx_xxxx.tsv)
   tsv_root: "/content/predictive/tsv"
-
-  # Output text JSONL (will later be used by `text.predictive_jsonl`)
   output_text_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
-
-  # Output eGeMAPS feature CSV for acoustic experiments
   output_egemaps_csv: "/content/predictive_egemaps_features.csv"
+
+  # optional TSV parsing knobs (so code doesn't hardcode)
+  tsv:
+    keep_speakers: null      # e.g. ["<B>"] ; null = keep all
+    drop_silence: true       # drop rows where value == "sil"
+    order_by: "no"           # "no" | "start_time" | null
+
+  dataset_name: "Chinese_predictive_challenge"
 
 # ---------------------------------------------------------------------
 #    Text preprocessing & dataset merging – used by preprocess_chinese.py
 # ---------------------------------------------------------------------
 text:
-  # JSONL converted from ASR CSV for NCMMSC
+  # Inputs
   ncmmsc_jsonl: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
-
-  # Chinese predictive dataset in JSONL form
-  # (produced by preprocess_predictive.py → predictive.output_text_jsonl)
   predictive_jsonl: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
+  taukadial_jsonl: null      # optional; set a path if available
 
-  # (Optional) TAUKADIAL JSONL – can be omitted if not available
-  # taukadial_jsonl: "/content/TAUKADIAL.jsonl"
-
-  # Directory to store merged & preprocessed JSONL files
+  # Outputs
   output_dir: "/content/chinese_combined"
-
-  # Name of merged JSONL combining all Chinese datasets
   combined_name: "Chinese_NCMMSC_iFlyTek.jsonl"
-
-  # Filenames for final train/test splits (written into output_dir)
   train_jsonl: "train_chinese.jsonl"
   test_jsonl: "test_chinese.jsonl"
 
-  # subset rules (driven by YAML; code should not hardcode any defaults)
-  target_datasets: ["NCMMSC2021_AD_Competition"]   # 只用 NCMMSC
-  target_labels: ["AD", "HC"]                      # binary：AD vs HC
-  balance: true                                    # 類別平衡（抽到同數）
+  # Merge candidates (strict mapping: dataset name ↔ file path)
+  corpora:
+    - name: "NCMMSC2021_AD_Competition"
+      path: "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
+    - name: "Chinese_predictive_challenge"
+      path: "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
+    - name: "TAUKADIAL"
+      path: null
+
+  # Subset rules (single source of truth)
+  target_datasets: ["NCMMSC2021_AD_Competition"]
+  target_labels: ["AD", "HC"]
+  balance: true
   subset_seed: *seed
-  cap_per_class: 300                               # debug 快速跑
+  cap_per_class: 300
 
-  # length-based outlier filter
+  # Label normalization (single source of truth)
+  label_map:
+    NC: "HC"
+    CTRL: "HC"
+    CONTROL: "HC"
+
+  # Language filtering
+  language_filter:
+    drop_languages: ["en"]
+
+  # Length-based outlier filter
   length_filter:
-    std_k: *length_std_k                           # keep within mean ± std_k * std
+    enabled: true
+    std_k: *length_std_k      # keep within mean ± std_k * std
 
-  # train/test split settings
+  # Train/test split
   split:
     test_size: *split_test_size
     random_state: *seed
-    min_per_class: *min_per_class                  # each class must have >= this count
-
+    stratify: true
+    min_per_class: *min_per_class
+  
 # ---------------------------------------------------------------------
-#    Text features + classifiers (TF-IDF / BERT / GloVe / Gemma)
-#    + K-fold cross-validation
+#    Text features + classifiers + K-fold cross-validation
 # ---------------------------------------------------------------------
 features:
-  # Which text feature method to run in the current experiment:
-  #   "tfidf" / "bert" / "glove" / "gemma"
   method: "bert"
 
-  # ---------------- TF-IDF + Logistic Regression --------------------
   tfidf:
     vectorizer:
       lowercase: true
       max_features: 20000
-      ngram_range: [1, 2]      # (1, 2) = unigram + bigram
-      stop_words: null         # Chinese: keep null, or set your own list
+      ngram_range: [1, 2]
+      stop_words: null
       min_df: 1
       max_df: 1.0
 
@@ -164,15 +164,11 @@ features:
       max_iter: *logreg_max_iter
       random_state: *seed
 
-  # ---------------- BERT embeddings + Logistic Regression -----------
   bert:
-    # For Chinese experiments, use a Chinese or multilingual model
-    # e.g. "bert-base-chinese" or "hfl/chinese-roberta-wwm-ext"
     model_name: "bert-base-chinese"
-    pooling: "mean"            # "mean" / "cls" / "last4_mean"
+    pooling: "mean"
     max_seq_length: *max_seq_length
-
-    device: "cuda"             # or "cpu"
+    device: "cuda"
 
     logreg:
       C: *logreg_C
@@ -181,16 +177,12 @@ features:
       max_iter: *logreg_max_iter
       random_state: *seed
 
-  # ---------------- GloVe embeddings + Logistic Regression ----------
   glove:
     embeddings_path: "/path/to/Glove/glove300.txt"
     embedding_dim: 300
-
     lowercase: true
     remove_stopwords: true
     stopwords_lang: "english"
-
-    # sentence embedding = sum(v_i) then L2-normalize
     pooling: "sum_l2norm"
 
     logreg:
@@ -200,16 +192,13 @@ features:
       max_iter: *logreg_max_iter
       random_state: *seed
 
-  # ---------------- Gemma-2B embeddings + Logistic Regression -------
   gemma:
     model_name: "google/gemma-2b"
-    pooling: "mean"            # sentence pooling over token embeddings
-
+    pooling: "mean"
     max_seq_length: *max_seq_length
-    padding: "longest"         # "longest" / "max_length"
+    padding: "longest"
     truncation: true
-
-    device: "cuda"             # or "cpu"
+    device: "cuda"
 
     logreg:
       C: *logreg_C
@@ -218,12 +207,10 @@ features:
       max_iter: *logreg_max_iter
       random_state: *seed
 
-  # ---------------- Cross-Validation common settings ----------------
   crossval:
     enabled: true
     n_splits: 5
     stratified: true
     shuffle: true
     random_state: *seed
-
-    metrics_average: "macro"   # "macro" / "weighted"
+    metrics_average: "macro"
