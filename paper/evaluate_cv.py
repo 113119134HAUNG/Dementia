@@ -205,7 +205,7 @@ def run_evaluate_cv(
             pooling = str(glove_cfg.get("pooling", "sum_l2norm"))
             logreg_cfg = get_dict(glove_cfg, "logreg", where="features.glove")
 
-            # NEW (Chinese-ready)
+            # Chinese-ready knobs (YAML-driven)
             tokenizer = str(glove_cfg.get("tokenizer", "whitespace")).strip().lower()
             max_words = glove_cfg.get("max_words", None)
             max_words_i = None if max_words is None else int(max_words)
