@@ -21,8 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from enums import ADType
-from config_utils import load_text_config, get_predictive_config
+from settings.enums import ADType
+from tools.config_utils import load_text_config, get_predictive_config
 
 # =====================================================================
 # Strict helpers
