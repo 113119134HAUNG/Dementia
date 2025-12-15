@@ -5,7 +5,7 @@
 common:
   seed: &seed 42
 
-  # preprocessing
+  # preprocessing (legacy anchors kept for backward compat)
   split_test_size: &split_test_size 0.2
   length_std_k: &length_std_k 1.0
   min_per_class: &min_per_class 2
@@ -68,12 +68,9 @@ predictive:
 
   dataset_name: "Chinese_predictive_challenge"
 
-  # preprocess_predictive.py currently reads predictive.keep_speakers
-  # 建議：排除 <NOISE> speaker，避免把 LAUGH/NOISE token 拼進文本
-  # 如果你只想保留單一說話者（例如只留受試者），就把 ["<A>", "<B>"] 改成 ["<B>"] 或你的標記
+  # speaker filtering (optional)
   keep_speakers: &pred_keep_speakers ["<A>", "<B>"]  # null = keep all
 
-  # future knobs (optional; keep as alias so it's never inconsistent)
   tsv:
     keep_speakers: *pred_keep_speakers
     drop_silence: true
@@ -89,7 +86,7 @@ text:
   output_dir: "/content/chinese_combined"
   combined_name: "Chinese_Combined.jsonl"
 
-  # kept for backward compatibility (preprocess_chinese no longer must use these)
+  # legacy (preprocess_chinese no longer needs split outputs)
   train_jsonl: "train_chinese.jsonl"
   test_jsonl: "test_chinese.jsonl"
 
@@ -139,7 +136,7 @@ text:
     enabled: true
     std_k: *length_std_k
 
-  # kept (not required by current flow; you can remove later if you want)
+  # legacy split (safe to keep; not required by current flow)
   split:
     test_size: *split_test_size
     random_state: *seed
@@ -202,8 +199,6 @@ features:
     model_name: "google/gemma-2b"
     pooling: "mean"
     max_seq_length: *max_seq_length
-    padding: "longest"
-    truncation: true
     device: "cuda"
     logreg:
       C: *logreg_C
@@ -233,6 +228,11 @@ features:
     # paper snippet behavior: TF-IDF fit on full data then slice folds
     # use "train" if you want strict per-fold train-only fitting
     tfidf_fit_scope: "full"   # "full" | "train"
+
+    # batching (optional; evaluate_cv reads these)
+    batch_size: 8
+    bert_batch_size: 8
+    gemma_batch_size: 2
 
     # printing toggles
     print_classification_report: true
