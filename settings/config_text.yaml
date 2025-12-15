@@ -102,10 +102,21 @@ text:
   cap_per_class: 300
 
   # Label normalization (config-driven)
-  label_map:
+    # HC variant
     NC: "HC"
+    CN: "HC"
     CTRL: "HC"
     CONTROL: "HC"
+    CONTROLS: "HC"
+    HEALTHY: "HC"
+    NORMAL: "HC"
+
+    # AD variants (如果你的資料可能出現)
+    PROBABLEAD: "AD"
+    POSSIBLEAD: "AD"
+
+    # MCI variants (如果你的資料可能出現)
+    MILDCOGNITIVEIMPAIRMENT: "MCI"
 
   # Language filtering (config-driven)
   language_filter:
