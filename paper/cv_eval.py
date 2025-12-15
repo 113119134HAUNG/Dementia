@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-cv_eval.py
+paper/cv_eval.py
 
 Evaluation core:
 - build LogisticRegression from YAML
 - evaluate with precomputed folds
+- (optional) TF-IDF train-only per fold evaluation (to keep evaluate_cv clean)
 """
 
 from __future__ import annotations
@@ -31,7 +32,6 @@ def build_logreg(cfg: Dict[str, Any]) -> LogisticRegression:
         max_iter=max_iter,
         random_state=random_state,
     )
-
 
 def evaluate_with_precomputed_folds(
     X_feats_all: np.ndarray,
@@ -115,4 +115,97 @@ def evaluate_with_precomputed_folds(
         "fold_metrics": fold_rows,
         "summary": summary,
         "confusion_matrices": cms if print_cm else [],
+    }
+
+def evaluate_tfidf_trainonly(
+    *,
+    X_text: List[str],
+    y: np.ndarray,
+    folds: List[Tuple[np.ndarray, np.ndarray]],
+    vectorizer_cfg: Dict[str, Any],
+    transformer_cfg: Dict[str, Any],
+    logreg_cfg: Dict[str, Any],
+    average: str,
+    zero_division: int,
+    print_report: bool,
+    print_cm: bool,
+    label_names: List[str],
+    method_name: str = "tfidf",
+) -> Dict[str, Any]:
+    """
+    TF-IDF strictly fit on TRAIN per fold.
+    Moved here to keep paper/evaluate_cv.py clean.
+    """
+    from paper.cv_features import tfidf_features_fold_fit  # local import keeps dependencies clean
+
+    clf_template = build_logreg(logreg_cfg)
+
+    fold_rows: List[Dict[str, Any]] = []
+    cms: List[List[List[int]]] = []
+
+    for fold_i, (tr, te) in enumerate(folds, start=1):
+        Xtr_txt = [X_text[i] for i in tr.tolist()]
+        Xte_txt = [X_text[i] for i in te.tolist()]
+
+        Xtr, Xte = tfidf_features_fold_fit(
+            Xtr_txt,
+            Xte_txt,
+            vectorizer_cfg=vectorizer_cfg,
+            transformer_cfg=transformer_cfg,
+        )
+
+        ytr, yte = y[tr], y[te]
+
+        clf = LogisticRegression(**clf_template.get_params())
+        clf.fit(Xtr, ytr)
+        ypred = clf.predict(Xte)
+
+        acc = float(metrics.accuracy_score(yte, ypred))
+        prec = float(metrics.precision_score(yte, ypred, average=average, zero_division=zero_division))
+        rec = float(metrics.recall_score(yte, ypred, average=average, zero_division=zero_division))
+        f1 = float(metrics.f1_score(yte, ypred, average=average, zero_division=zero_division))
+
+        fold_rows.append(
+            {
+                "fold": fold_i,
+                "accuracy": acc,
+                "precision": prec,
+                "recall": rec,
+                "f1": f1,
+                "n_train": int(len(tr)),
+                "n_test": int(len(te)),
+            }
+        )
+
+        if print_report:
+            print(f"\nFold {fold_i} ({method_name} train-only):")
+            print(metrics.classification_report(yte, ypred, target_names=label_names, zero_division=zero_division))
+
+        if print_cm:
+            cm = metrics.confusion_matrix(yte, ypred, labels=[0, 1]).astype(int).tolist()
+            cms.append(cm)
+            print(f"[Confusion Matrix] Fold {fold_i} ({method_name} train-only) labels={label_names}: {cm}")
+
+    arr_acc = np.array([r["accuracy"] for r in fold_rows], dtype=np.float64)
+    arr_prec = np.array([r["precision"] for r in fold_rows], dtype=np.float64)
+    arr_rec = np.array([r["recall"] for r in fold_rows], dtype=np.float64)
+    arr_f1 = np.array([r["f1"] for r in fold_rows], dtype=np.float64)
+
+    summary = {
+        "accuracy_mean": float(arr_acc.mean()),
+        "accuracy_std": float(arr_acc.std()),
+        "precision_mean": float(arr_prec.mean()),
+        "precision_std": float(arr_prec.std()),
+        "recall_mean": float(arr_rec.mean()),
+        "recall_std": float(arr_rec.std()),
+        "f1_mean": float(arr_f1.mean()),
+        "f1_std": float(arr_f1.std()),
+    }
+
+    return {
+        "method": method_name,
+        "fold_metrics": fold_rows,
+        "summary": summary,
+        "confusion_matrices": cms if print_cm else [],
+        "tfidf_fit_scope": "train",
     }
