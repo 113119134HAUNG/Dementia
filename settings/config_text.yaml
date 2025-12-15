@@ -68,6 +68,10 @@ predictive:
 
   dataset_name: "Chinese_predictive_challenge"
 
+  # optional (if your preprocess_predictive.py reads it)
+  keep_speakers: null        # e.g. ["<B>"] ; null = keep all
+
+  # keep for future knobs (even if current code doesn't consume them yet)
   tsv:
     keep_speakers: null      # e.g. ["<B>"] ; null = keep all
     drop_silence: true       # drop rows where value == "sil"
@@ -85,7 +89,7 @@ text:
   train_jsonl: "train_chinese.jsonl"
   test_jsonl: "test_chinese.jsonl"
 
-  # Merge candidates (ONLY this list is used to merge; no duplicate path keys)
+  # Merge candidates (ONLY this list is used to merge)
   corpora:
     - name: "NCMMSC2021_AD_Competition"
       path: *ncmmsc_jsonl
@@ -102,7 +106,8 @@ text:
   cap_per_class: 300
 
   # Label normalization (config-driven)
-    # HC variant
+  label_map:
+    # HC variants
     NC: "HC"
     CN: "HC"
     CTRL: "HC"
@@ -111,11 +116,11 @@ text:
     HEALTHY: "HC"
     NORMAL: "HC"
 
-    # AD variants (如果你的資料可能出現)
+    # AD variants
     PROBABLEAD: "AD"
     POSSIBLEAD: "AD"
 
-    # MCI variants (如果你的資料可能出現)
+    # MCI variants
     MILDCOGNITIVEIMPAIRMENT: "MCI"
 
   # Language filtering (config-driven)
