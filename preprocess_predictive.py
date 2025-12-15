@@ -3,26 +3,6 @@
 preprocess_predictive.py
 
 Config-driven preprocessing for the Chinese predictive challenge dataset.
-
-Input resources
----------------
-1. Meta CSV (e.g., 2_final_list_train.csv)
-       - columns: uuid, label, sex, age, education, ...
-2. eGeMAPS CSV (e.g., egemaps_final.csv)
-       - one row per uuid, many acoustic features
-3. Per-utterance TSV transcripts
-       - files named as <uuid>.tsv
-       - schema: no, start_time, end_time, speaker, value
-
-Outputs
--------
-1. Text JSONL for downstream NLP:
-       predictive.output_text_jsonl
-       (to be used later as `text.predictive_jsonl` in preprocess_chinese.py)
-2. eGeMAPS feature CSV for acoustic baselines:
-       predictive.output_egemaps_csv
-
-All paths are configured in config_text.yaml under the `predictive` section.
 """
 
 import argparse
@@ -35,75 +15,62 @@ import pandas as pd
 from enums import ADType
 from config_utils import get_predictive_config
 
-# Dataset name used in the JSONL "Dataset" field
 PREDICTIVE_DATASET_NAME = "Chinese_predictive_challenge"
-
-# If you want to keep only certain speakers (e.g., patient channel),
-# set this to a list like ["<B>"] or ["<A>"].
-# None = keep all non-"sil" rows regardless of speaker.
 KEEP_SPEAKERS: Optional[List[str]] = None
 
 # =====================================================================
-#    TSV → long-form text
+# Small utils (keep clean, no extra deps)
 # =====================================================================
+def _normalize_and_dedup_uuid(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    """Normalize uuid as stripped string and drop duplicated uuids (keep first)."""
+    if df is None or df.empty:
+        return df
+    if "uuid" not in df.columns:
+        return df
 
+    out = df.copy()
+    out["uuid"] = out["uuid"].astype(str).str.strip()
+    out = out.dropna(subset=["uuid"])
+
+    dup = int(out["uuid"].duplicated().sum())
+    if dup > 0:
+        print(f"[WARN] {name}: found {dup} duplicated uuid rows → keep first occurrence.")
+        out = out.drop_duplicates(subset=["uuid"], keep="first")
+
+    return out.reset_index(drop=True)
+
+# =====================================================================
+# TSV → long-form text
+# =====================================================================
 def tsv_to_text(tsv_path: Path) -> str:
-    """Convert a single *.tsv file into one long text string.
-
-    Expected TSV schema
-    -------------------
-    Columns:
-        - no
-        - start_time
-        - end_time
-        - speaker
-        - value
-    """
-    df = pd.read_csv(tsv_path, sep="\t")
+    """Convert a single *.tsv file into one long text string."""
+    df = pd.read_csv(tsv_path, sep="\t", keep_default_na=False)
 
     if "value" not in df.columns:
         raise ValueError(f"TSV file {tsv_path} has no 'value' column.")
 
-    # Drop pure silence rows
-    df = df[df["value"].astype(str) != "sil"]
-
-    # Optionally keep only specific speakers
     if KEEP_SPEAKERS is not None:
         if "speaker" not in df.columns:
             raise ValueError(f"TSV file {tsv_path} has no 'speaker' column.")
-        df = df[df["speaker"].isin(KEEP_SPEAKERS)]
+        df = df[df["speaker"].astype(str).isin(KEEP_SPEAKERS)]
 
-    # Simple concatenation of 'value' (keep &嗯 / annotations as-is;
-    # downstream text_cleaning will decide what to remove)
-    text = " ".join(df["value"].astype(str))
-    return text
+    if "no" in df.columns:
+        df["_no"] = pd.to_numeric(df["no"], errors="coerce")
+        df = df.sort_values(by="_no", kind="mergesort").drop(columns=["_no"])
+    elif "start_time" in df.columns:
+        df["_st"] = pd.to_numeric(df["start_time"], errors="coerce")
+        df = df.sort_values(by="_st", kind="mergesort").drop(columns=["_st"])
+
+    vals = df["value"].astype(str).str.strip()
+    vals = vals[vals != ""]
+    vals = vals[vals.str.lower() != "sil"]
+
+    return " ".join(vals.tolist())
 
 # =====================================================================
-#    Text JSONL: meta + TSV → JSONL
+# Text JSONL: meta + TSV → JSONL
 # =====================================================================
-
-def build_text_jsonl(
-    meta_df: pd.DataFrame,
-    tsv_root: Path,
-    output_jsonl: Path,
-) -> int:
-    """Build predictive text JSONL from meta CSV and TSV files.
-
-    Parameters
-    ----------
-    meta_df : pd.DataFrame
-        Meta table including `uuid` and `Diagnosis` (AD / HC / MCI),
-        plus optional demographics (sex, age, education).
-    tsv_root : Path
-        Directory containing <uuid>.tsv transcripts.
-    output_jsonl : Path
-        Output JSONL path.
-
-    Returns
-    -------
-    int
-        Number of successfully processed samples.
-    """
+def build_text_jsonl(meta_df: pd.DataFrame, tsv_root: Path, output_jsonl: Path) -> int:
     records: List[dict] = []
     missing_tsv: List[str] = []
 
@@ -113,8 +80,9 @@ def build_text_jsonl(
         raise ValueError("Meta DataFrame is expected to contain 'Diagnosis'.")
 
     for _, row in meta_df.iterrows():
-        uid = row["uuid"]
-        diag = row["Diagnosis"]
+        uid = str(row["uuid"]).strip()
+        diag = str(row["Diagnosis"]).strip()
+
         sex = row.get("sex", None)
         age = row.get("age", None)
         edu = row.get("education", None)
@@ -126,17 +94,18 @@ def build_text_jsonl(
 
         text = tsv_to_text(tsv_path)
 
-        rec = {
-            "ID": uid,
-            "Diagnosis": diag,
-            "Text_interviewer_participant": text,
-            "Dataset": PREDICTIVE_DATASET_NAME,
-            "Languages": "zh",
-            "sex": sex,
-            "age": age,
-            "education": edu,
-        }
-        records.append(rec)
+        records.append(
+            {
+                "ID": uid,
+                "Diagnosis": diag,
+                "Text_interviewer_participant": text,
+                "Dataset": PREDICTIVE_DATASET_NAME,
+                "Languages": "zh",
+                "sex": sex,
+                "age": age,
+                "education": edu,
+            }
+        )
 
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with output_jsonl.open("w", encoding="utf-8") as f:
@@ -150,23 +119,9 @@ def build_text_jsonl(
     return len(records)
 
 # =====================================================================
-#   eGeMAPS CSV: meta + eGeMAPS → feature CSV
+# eGeMAPS CSV: meta + eGeMAPS → feature CSV
 # =====================================================================
-
-def build_egemaps_csv(
-    meta_df: pd.DataFrame,
-    egemaps_df: pd.DataFrame,
-    output_csv: Path,
-) -> Tuple[int, int]:
-    """Merge meta and eGeMAPS tables on `uuid` and save feature CSV.
-
-    Output columns (in order)
-    -------------------------
-        - uuid
-        - Diagnosis
-        - sex, age, education
-        - all eGeMAPS features from egemaps_df (excluding its own 'uuid')
-    """
+def build_egemaps_csv(meta_df: pd.DataFrame, egemaps_df: pd.DataFrame, output_csv: Path) -> Tuple[int, int]:
     if "uuid" not in meta_df.columns:
         raise ValueError("Meta CSV is expected to contain a 'uuid' column.")
     if "uuid" not in egemaps_df.columns:
@@ -178,7 +133,6 @@ def build_egemaps_csv(
         f"→ {len(merged)} rows."
     )
 
-    # Basic info first, acoustic features afterwards
     feature_cols = [c for c in egemaps_df.columns if c != "uuid"]
     ordered_cols = ["uuid", "Diagnosis", "sex", "age", "education"] + feature_cols
     ordered_cols = [c for c in ordered_cols if c in merged.columns]
@@ -189,24 +143,9 @@ def build_egemaps_csv(
     return len(merged), len(feature_cols)
 
 # =====================================================================
-#    Orchestrator
+# Orchestrator
 # =====================================================================
-
-def run_predictive_preprocessing(
-    config_path: Optional[str] = None,
-) -> Tuple[str, str]:
-    """End-to-end preprocessing for the Chinese predictive challenge dataset.
-
-    Parameters
-    ----------
-    config_path : str or None
-        Path to config_text.yaml. If None, the default path is used.
-
-    Returns
-    -------
-    (str, str)
-        Tuple of (output_text_jsonl_path, output_egemaps_csv_path).
-    """
+def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str, str]:
     pred_cfg = get_predictive_config(path=config_path)
 
     meta_csv = Path(pred_cfg["meta_csv"])
@@ -221,28 +160,27 @@ def run_predictive_preprocessing(
     if "label" not in meta_df.columns:
         raise ValueError("Meta CSV is expected to contain a 'label' column.")
 
-    # Normalize labels to AD / HC / MCI using ADType
-    meta_df["Diagnosis"] = meta_df["label"].apply(
-        lambda s: ADType.from_any(s).value
-    )
+    # Normalize & de-duplicate uuid ONCE (paper-like single point)
+    meta_df = _normalize_and_dedup_uuid(meta_df, name="meta")
+
+    # Normalize labels to canonical 3-way: AD / HC / MCI
+    meta_df["Diagnosis"] = meta_df["label"].apply(lambda s: ADType.from_any(s).value)
 
     print(f"[INFO] Loading eGeMAPS from: {egemaps_csv}")
     egemaps_df = pd.read_csv(egemaps_csv)
 
-    # 1) Build text JSONL for NLP experiments
-    build_text_jsonl(meta_df, tsv_root, out_text_jsonl)
+    # Normalize & de-duplicate uuid ONCE
+    egemaps_df = _normalize_and_dedup_uuid(egemaps_df, name="eGeMAPS")
 
-    # 2) Build eGeMAPS feature CSV for acoustic experiments
+    build_text_jsonl(meta_df, tsv_root, out_text_jsonl)
     build_egemaps_csv(meta_df, egemaps_df, out_egemaps_csv)
 
     return str(out_text_jsonl), str(out_egemaps_csv)
 
 # =====================================================================
-#    CLI
+# CLI
 # =====================================================================
-
 def build_arg_parser() -> argparse.ArgumentParser:
-    """Build CLI argument parser for predictive preprocessing."""
     parser = argparse.ArgumentParser(
         description=(
             "Preprocess the Chinese predictive challenge dataset "
