@@ -1,3 +1,5 @@
+%%bash
+cat > /content/Dementia/settings/config_text.yaml <<'YAML'
 # =====================================================================
 # config_text.yaml (single source of truth, paper-strict, converged)
 # =====================================================================
@@ -124,9 +126,9 @@ features:
       random_state: *seed
 
   bert:
-    model_name: "bert-base-chinese"
+    model_name: "/content/models/bert-base-chinese"
     embedding_strategy: "mean"
-    last_n_layers: 4 
+    last_n_layers: 4
     max_seq_length: *max_seq_length
     device: "cuda"
     logreg:
@@ -137,7 +139,6 @@ features:
       random_state: *seed
 
   glove:
-    # fastText .vec (word + 300 dims)
     embeddings_path: "/content/embeddings/cc.zh.300.vec"
     embedding_dim: 300
     tokenizer: "jieba"
@@ -154,7 +155,7 @@ features:
       random_state: *seed
 
   gemma:
-    model_name: "google/gemma-2b"
+    model_name: "/content/models/google__gemma-2b"
     pooling: "mean"
     max_seq_length: *max_seq_length
     device: "cuda"
@@ -174,7 +175,7 @@ features:
 
     methods: ["tfidf", "bert", "glove", "gemma"]
 
-    tfidf_fit_scope: "full"   # "full" | "train"
+    tfidf_fit_scope: "full"
 
     batch_size: 8
     bert_batch_size: 8
@@ -187,3 +188,4 @@ features:
     print_classification_report: true
     print_confusion_matrix: true
     print_method_summary: true
+YAML
