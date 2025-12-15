@@ -1,24 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-preprocess_predictive.py (paper-strict)
+preprocess_chinese.py (paper-strict, converged)
 
+Rules:
 - Load YAML once.
-- TSV parsing behavior is driven by predictive.tsv:
-    keep_speakers / drop_silence / order_by
-- dataset_name is driven by predictive.dataset_name
+- Merge ONLY uses text.corpora (include only existing paths).
+- Dataset/label/balance/cap filtering happens ONLY in apply_subset().
+- ASR CSV MUST contain 'transcript' (no fallback).
+- label_map / language_filter / length_filter.enabled / split.stratify are YAML-driven.
+- NCMMSC dataset name MUST come from text.corpora entry matching text.ncmmsc_jsonl (fail-fast).
+- length_filter must NOT leak 'length' column to outputs (drop before return).
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
+from collection import JSONLCombiner
+from dataset_subset import apply_subset
+from text_cleaning import clean_asr_chinese, clean_structured_chinese
+from config_utils import load_text_config, get_asr_config, get_text_config
 from enums import ADType
-from config_utils import load_text_config, get_predictive_config
 
 # =====================================================================
 # Strict helpers
@@ -29,6 +36,7 @@ def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
         raise KeyError(f"Config missing required key: {prefix}{key}")
     return cfg[key]
 
+
 def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, Any]:
     v = _require(cfg, key, where=where)
     if not isinstance(v, dict):
@@ -36,226 +44,340 @@ def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, An
         raise ValueError(f"{prefix}{key} must be a dict.")
     return v
 
-def _norm_str_list(x: Any) -> Optional[List[str]]:
-    if x is None:
-        return None
-    if isinstance(x, (list, tuple)):
-        out = [str(i).strip() for i in x if str(i).strip()]
-        return out or None
-    s = str(x).strip()
-    return [s] if s else None
+
+def _get_list(cfg: Dict[str, Any], key: str, *, where: str = "") -> List[Any]:
+    v = _require(cfg, key, where=where)
+    if not isinstance(v, list):
+        prefix = f"{where}." if where else ""
+        raise ValueError(f"{prefix}{key} must be a list.")
+    return v
+
+
+def _resolve_path(p: Any) -> Path:
+    return Path(str(p)).expanduser().resolve()
 
 # =====================================================================
-# uuid normalize + dedup (single point)
+# Step 1: ASR CSV -> NCMMSC JSONL
 # =====================================================================
-_INVALID_UUID = {"", "nan", "none", "null"}
+def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) -> str:
+    csv_path_p = Path(csv_path)
+    jsonl_path_p = Path(jsonl_path)
 
-def _normalize_and_dedup_uuid(df: pd.DataFrame, *, name: str) -> Tuple[pd.DataFrame, Dict[str, int]]:
-    if df is None or df.empty or "uuid" not in df.columns:
-        return df, {"dropped_invalid": 0, "dropped_dups": 0}
+    df = pd.read_csv(csv_path_p, encoding="utf-8-sig")
 
-    out = df.copy()
-    uu = out["uuid"].astype(str).str.strip()
-    uu_low = uu.str.lower()
+    for col in ("id", "label", "transcript"):
+        if col not in df.columns:
+            raise ValueError(
+                f"ASR CSV missing required column: {col} (paper-strict, no fallback)"
+            )
 
-    valid = ~uu_low.isin(_INVALID_UUID)
-    dropped_invalid = int((~valid).sum())
-    out = out.loc[valid].copy()
-    out["uuid"] = uu.loc[valid].astype(str).str.strip()
+    out_df = pd.DataFrame(
+        {
+            "ID": df["id"].astype(str),
+            "Diagnosis": df["label"].astype(str),
+            "Text_interviewer_participant": df["transcript"].fillna("").astype(str),
+            "Dataset": str(dataset_name),
+            "Languages": "zh",
+        }
+    )
 
-    dup_mask = out["uuid"].duplicated(keep="first")
-    dropped_dups = int(dup_mask.sum())
-    if dropped_dups > 0:
-        out = out.loc[~dup_mask].copy()
-
-    return out.reset_index(drop=True), {"dropped_invalid": dropped_invalid, "dropped_dups": dropped_dups}
-
-# =====================================================================
-# TSV -> long-form text (YAML-driven)
-# =====================================================================
-def tsv_to_text(
-    tsv_path: Path,
-    *,
-    keep_speakers: Optional[List[str]],
-    drop_silence: bool,
-    order_by: Optional[str],
-) -> str:
-    df = pd.read_csv(tsv_path, sep="\t", keep_default_na=False)
-
-    if "value" not in df.columns:
-        raise ValueError(f"TSV file {tsv_path} has no 'value' column.")
-
-    if keep_speakers is not None:
-        if "speaker" not in df.columns:
-            raise ValueError(f"TSV file {tsv_path} has no 'speaker' column.")
-        ks = {str(x).strip() for x in keep_speakers if str(x).strip()}
-        df = df[df["speaker"].astype(str).str.strip().isin(ks)]
-
-    if order_by == "no" and "no" in df.columns:
-        df["_no"] = pd.to_numeric(df["no"], errors="coerce")
-        df = df.sort_values(by="_no", kind="mergesort").drop(columns=["_no"])
-    elif order_by == "start_time" and "start_time" in df.columns:
-        df["_st"] = pd.to_numeric(df["start_time"], errors="coerce")
-        df = df.sort_values(by="_st", kind="mergesort").drop(columns=["_st"])
-
-    vals = df["value"].astype(str).str.strip()
-    vals = vals[vals != ""]
-
-    if drop_silence:
-        vals = vals[vals.str.lower() != "sil"]
-
-    return " ".join(vals.tolist())
+    jsonl_path_p.parent.mkdir(parents=True, exist_ok=True)
+    out_df.to_json(jsonl_path_p, orient="records", lines=True, force_ascii=False)
+    print(f"[INFO] Saved NCMMSC JSONL to: {jsonl_path_p}")
+    return str(jsonl_path_p)
 
 # =====================================================================
-# Build outputs
+# Step 2: Merge JSONLs (only existing, ONLY text.corpora)
 # =====================================================================
-def build_text_jsonl(
-    meta_df: pd.DataFrame,
-    *,
-    tsv_root: Path,
-    output_jsonl: Path,
-    dataset_name: str,
-    keep_speakers: Optional[List[str]],
-    drop_silence: bool,
-    order_by: Optional[str],
-) -> int:
-    records: List[dict] = []
-    missing: List[str] = []
+def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_name: str) -> str:
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    for _, row in meta_df.iterrows():
-        uid = str(row["uuid"]).strip()
-        diag = str(row["Diagnosis"]).strip()
+    input_files: List[str] = []
+    for c in corpora:
+        if not isinstance(c, dict):
+            raise ValueError("text.corpora entries must be dicts with keys: name, path.")
+        if "name" not in c or "path" not in c:
+            raise ValueError("Each text.corpora entry must contain keys: name, path.")
 
-        sex = row.get("sex", None)
-        age = row.get("age", None)
-        edu = row.get("education", None)
-
-        tsv_path = tsv_root / f"{uid}.tsv"
-        if not tsv_path.exists():
-            missing.append(uid)
+        path = c.get("path", None)
+        if path is None:
             continue
 
-        text = tsv_to_text(
-            tsv_path,
-            keep_speakers=keep_speakers,
-            drop_silence=drop_silence,
-            order_by=order_by,
-        )
+        p = Path(str(path))
+        if not p.exists():
+            print(f"[WARN] Missing JSONL, skip: {p} (name={c.get('name')})")
+            continue
 
-        records.append(
-            {
-                "ID": uid,
-                "Diagnosis": diag,
-                "Text_interviewer_participant": text,
-                "Dataset": dataset_name,
-                "Languages": "zh",
-                "sex": sex,
-                "age": age,
-                "education": edu,
-            }
-        )
+        input_files.append(str(p))
 
-    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    with output_jsonl.open("w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    if not input_files:
+        raise FileNotFoundError("No input JSONL files found for merging (check text.corpora paths).")
 
-    print(f"[INFO] Wrote {len(records)} text records to {output_jsonl}")
-    if missing:
-        print(f"[WARN] Missing TSV for {len(missing)} uuids (skipped). e.g. {missing[:5]}")
-    return len(records)
+    print("[INFO] Combining JSONL files:")
+    for f in input_files:
+        print(f"  - {f}")
 
-def build_egemaps_csv(meta_df: pd.DataFrame, egemaps_df: pd.DataFrame, *, output_csv: Path) -> Tuple[int, int]:
-    merged = meta_df.merge(egemaps_df, on="uuid", how="inner")
-    print(f"[INFO] Merged meta ({len(meta_df)}) with eGeMAPS ({len(egemaps_df)}) -> {len(merged)} rows.")
+    combiner = JSONLCombiner(input_files, str(out_dir), merged_name)
+    combiner.combine()
 
-    feature_cols = [c for c in egemaps_df.columns if c != "uuid"]
-    ordered_cols = ["uuid", "Diagnosis", "sex", "age", "education"] + feature_cols
-    ordered_cols = [c for c in ordered_cols if c in merged.columns]
+    merged_path = out_dir / merged_name
+    print(f"[INFO] Combined JSONL saved to: {merged_path}")
+    return str(merged_path)
 
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    merged[ordered_cols].to_csv(output_csv, index=False, encoding="utf-8-sig")
-    print(f"[INFO] Saved eGeMAPS feature table to: {output_csv}")
-    return len(merged), len(feature_cols)
+# =====================================================================
+# Step 3-6: Load + dedup + normalize + filter + subset + clean + length
+# =====================================================================
+def dedup_records(df: pd.DataFrame) -> pd.DataFrame:
+    """Paper-strict: drop duplicated (Dataset, ID) if possible."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if "Dataset" in out.columns and "ID" in out.columns:
+        dup = int(out.duplicated(subset=["Dataset", "ID"]).sum())
+        if dup > 0:
+            print(f"[WARN] Found {dup} duplicated rows by (Dataset, ID) -> keep first.")
+            out = out.drop_duplicates(subset=["Dataset", "ID"], keep="first")
+    return out.reset_index(drop=True)
+
+
+def normalize_diagnosis_labels(df: pd.DataFrame, *, label_map: Dict[str, Any]) -> pd.DataFrame:
+    if "Diagnosis" not in df.columns:
+        raise ValueError("Expected column 'Diagnosis' not found.")
+
+    mp = {str(k).strip().upper(): str(v).strip() for k, v in (label_map or {}).items()}
+
+    def _map_one(x: Any) -> str:
+        s = "" if x is None else str(x).strip()
+        s_up = s.upper()
+        if s_up in mp:
+            s = mp[s_up]
+        try:
+            return ADType.from_any(s).value
+        except Exception:
+            return "Unknown"
+
+    out = df.copy()
+    out["Diagnosis"] = out["Diagnosis"].apply(_map_one)
+
+    unk_n = int((out["Diagnosis"] == "Unknown").sum())
+    if unk_n > 0:
+        print(f"[WARN] Diagnosis == 'Unknown' rows = {unk_n} (will be removed by apply_subset if target_labels set).")
+
+    return out.reset_index(drop=True)
+
+def drop_languages(df: pd.DataFrame, *, drop_langs: List[str]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if "Languages" not in df.columns:
+        return df
+    dl = {str(x).strip().lower() for x in (drop_langs or []) if str(x).strip()}
+    if not dl:
+        return df
+    lang = df["Languages"].astype(str).str.strip().str.lower()
+    return df.loc[~lang.isin(dl)].reset_index(drop=True)
+
+def clean_text_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "Text_interviewer_participant" not in df.columns:
+        raise ValueError("Expected column 'Text_interviewer_participant' not found.")
+    out = df.copy()
+
+    # single cleaning point in whole pipeline
+    out["Text_interviewer_participant"] = out["Text_interviewer_participant"].apply(clean_asr_chinese)
+    out["Text_interviewer_participant"] = out["Text_interviewer_participant"].apply(clean_structured_chinese)
+    return out
+
+def length_filter(df: pd.DataFrame, *, enabled: bool, std_k: float) -> pd.DataFrame:
+    if not enabled or df is None or df.empty:
+        return df
+    if std_k < 0:
+        raise ValueError("text.length_filter.std_k must be >= 0.")
+
+    out = df.copy()
+    out["length"] = out["Text_interviewer_participant"].apply(len)
+
+    stats = out.groupby("Diagnosis")["length"].agg(["min", "max", "mean", "std"])
+    stats["std"] = stats["std"].fillna(0.0)
+    print("[INFO] Length stats by Diagnosis:\n", stats)
+
+    merged = out.merge(
+        stats[["mean", "std"]],
+        left_on="Diagnosis",
+        right_index=True,
+        how="left",
+        suffixes=("", "_stat"),
+    )
+
+    lower = merged["mean"] - (float(std_k) * merged["std"])
+    upper = merged["mean"] + (float(std_k) * merged["std"])
+    keep = (merged["length"] >= lower) & (merged["length"] <= upper)
+
+    filtered = out.loc[keep.values].reset_index(drop=True)
+
+    # paper-strict: do NOT leak helper columns
+    if "length" in filtered.columns:
+        filtered = filtered.drop(columns=["length"])
+
+    print(f"[INFO] After length filtering: {len(filtered)} samples remaining.")
+    if not filtered.empty:
+        print("[INFO] Label distribution after filtering:\n", filtered["Diagnosis"].value_counts())
+    return filtered
+
+def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -> pd.DataFrame:
+    df = pd.read_json(Path(merged_jsonl_path), lines=True)
+
+    df = dedup_records(df)
+
+    # normalize labels (single point)
+    label_map = text_cfg.get("label_map", {}) or {}
+    df = normalize_diagnosis_labels(df, label_map=label_map)
+
+    # language filter (YAML-driven)
+    lang_cfg = _get_dict(text_cfg, "language_filter", where="text")
+    df = drop_languages(df, drop_langs=lang_cfg.get("drop_languages", []) or [])
+
+    # subset happens ONLY here (paper-strict)
+    df = apply_subset(df, text_cfg)
+    print(f"[INFO] After subset: {len(df)} samples remaining.")
+    if not df.empty:
+        print("[INFO] Label distribution after subset:\n", df["Diagnosis"].value_counts())
+
+    # fail-fast if Unknown still exists after subset (strict)
+    if not df.empty and (df["Diagnosis"].astype(str) == "Unknown").any():
+        raise ValueError("Found Diagnosis=='Unknown' after apply_subset. Fix label_map/ADType or target_labels.")
+
+    # clean only after subset (single point)
+    df = clean_text_column(df)
+
+    if df.empty:
+        return df.reset_index(drop=True)
+
+    # length filter (YAML-driven)
+    lf_cfg = _get_dict(text_cfg, "length_filter", where="text")
+    enabled = bool(lf_cfg.get("enabled", True))
+    std_k = float(_require(lf_cfg, "std_k", where="text.length_filter"))
+    return length_filter(df, enabled=enabled, std_k=std_k)
+
+# =====================================================================
+# Step 7: Split + save (YAML-driven)
+# =====================================================================
+def _validate_split_feasibility(df: pd.DataFrame, *, min_per_class: int, stratify: bool) -> None:
+    if df is None or df.empty:
+        raise ValueError("No samples to split (df is empty).")
+    if "Diagnosis" not in df.columns:
+        raise ValueError("Expected column 'Diagnosis' not found.")
+
+    if stratify:
+        vc = df["Diagnosis"].value_counts()
+        if vc.size < 2:
+            raise ValueError(f"Need at least 2 classes for stratified split, got: {list(vc.index)}")
+        if (vc < int(min_per_class)).any():
+            raise ValueError(f"Each class must have >= {min_per_class} samples. Counts:\n{vc}")
+
+def split_and_save(
+    df: pd.DataFrame,
+    *,
+    output_dir: str,
+    train_name: str,
+    test_name: str,
+    test_size: float,
+    random_state: int,
+    stratify: bool,
+    min_per_class: int,
+) -> Tuple[str, str]:
+    _validate_split_feasibility(df, min_per_class=min_per_class, stratify=stratify)
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    strat = df["Diagnosis"] if stratify else None
+    train_df, test_df = train_test_split(
+        df,
+        test_size=float(test_size),
+        stratify=strat,
+        random_state=int(random_state),
+    )
+
+    train_out = out_dir / train_name
+    test_out = out_dir / test_name
+
+    train_df.to_json(train_out, orient="records", lines=True, force_ascii=False)
+    test_df.to_json(test_out, orient="records", lines=True, force_ascii=False)
+
+    print(f"[INFO] Saved train split to: {train_out}")
+    print(f"[INFO] Saved test  split to: {test_out}")
+    return str(train_out), str(test_out)
 
 # =====================================================================
 # Orchestrator
 # =====================================================================
-def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str, str]:
+def run_chinese_preprocessing(config_path: Optional[str] = None, skip_asr: bool = False) -> Tuple[str, str]:
     cfg = load_text_config(config_path)
-    pred_cfg = get_predictive_config(cfg=cfg)
+    asr_cfg = get_asr_config(cfg=cfg)
+    text_cfg = get_text_config(cfg=cfg)
 
-    meta_csv = Path(_require(pred_cfg, "meta_csv", where="predictive"))
-    egemaps_csv = Path(_require(pred_cfg, "egemaps_csv", where="predictive"))
-    tsv_root = Path(_require(pred_cfg, "tsv_root", where="predictive"))
-    out_text_jsonl = Path(_require(pred_cfg, "output_text_jsonl", where="predictive"))
-    out_egemaps_csv = Path(_require(pred_cfg, "output_egemaps_csv", where="predictive"))
+    ncmmsc_jsonl = _require(text_cfg, "ncmmsc_jsonl", where="text")
+    output_dir = _require(text_cfg, "output_dir", where="text")
+    merged_name = _require(text_cfg, "combined_name", where="text")
+    train_name = _require(text_cfg, "train_jsonl", where="text")
+    test_name = _require(text_cfg, "test_jsonl", where="text")
 
-    dataset_name = str(pred_cfg.get("dataset_name", "Chinese_predictive_challenge")).strip() or "Chinese_predictive_challenge"
+    corpora = _get_list(text_cfg, "corpora", where="text")
 
-    tsv_cfg = _get_dict(pred_cfg, "tsv", where="predictive")
-    keep_speakers = _norm_str_list(tsv_cfg.get("keep_speakers"))
-    drop_silence = bool(tsv_cfg.get("drop_silence", True))
-    order_by = tsv_cfg.get("order_by", None)
-    order_by = None if order_by is None else str(order_by).strip()
-    if order_by not in (None, "no", "start_time"):
-        raise ValueError("predictive.tsv.order_by must be one of: 'no', 'start_time', null")
+    # strict: corpora must contain an entry whose path == text.ncmmsc_jsonl
+    ncmmsc_path = _resolve_path(ncmmsc_jsonl)
+    ncmmsc_name = None
+    for c in corpora:
+        if isinstance(c, dict) and c.get("path") is not None:
+            if _resolve_path(c["path"]) == ncmmsc_path:
+                ncmmsc_name = c.get("name")
+                break
+    if not ncmmsc_name:
+        raise ValueError("paper-strict: text.corpora must include NCMMSC entry matching text.ncmmsc_jsonl exactly.")
 
-    if not meta_csv.exists():
-        raise FileNotFoundError(f"Meta CSV not found: {meta_csv}")
-    if not egemaps_csv.exists():
-        raise FileNotFoundError(f"eGeMAPS CSV not found: {egemaps_csv}")
-    if not tsv_root.exists():
-        raise FileNotFoundError(f"TSV root not found: {tsv_root}")
+    # Step 1
+    if not skip_asr:
+        asr_csv = _require(asr_cfg, "output_csv", where="asr")
+        csv_to_ncmmsc_jsonl(asr_csv, ncmmsc_jsonl, dataset_name=str(ncmmsc_name))
+    else:
+        print(f"[INFO] Skipping ASR -> JSONL. Using existing: {ncmmsc_jsonl}")
 
-    print(f"[INFO] Loading meta from: {meta_csv}")
-    meta_df = pd.read_csv(meta_csv)
-    if "label" not in meta_df.columns or "uuid" not in meta_df.columns:
-        raise ValueError("Meta CSV must contain columns: uuid, label")
+    # Step 2
+    merged_path = combine_jsonls(corpora=corpora, output_dir=output_dir, merged_name=merged_name)
 
-    meta_df, meta_stats = _normalize_and_dedup_uuid(meta_df, name="meta")
-    if meta_stats["dropped_invalid"] > 0:
-        print(f"[WARN] meta: dropped invalid uuid rows = {meta_stats['dropped_invalid']}")
-    if meta_stats["dropped_dups"] > 0:
-        print(f"[WARN] meta: dropped duplicated uuid rows = {meta_stats['dropped_dups']}")
+    # Step 3-6
+    df_clean = load_and_process_chinese(merged_path, text_cfg)
 
-    meta_df["Diagnosis"] = meta_df["label"].apply(lambda s: ADType.from_any(s).value)
+    # Step 7 (YAML-driven)
+    sp_cfg = _get_dict(text_cfg, "split", where="text")
+    test_size = float(_require(sp_cfg, "test_size", where="text.split"))
+    random_state = int(_require(sp_cfg, "random_state", where="text.split"))
+    stratify = bool(sp_cfg.get("stratify", True))
+    min_per_class = int(_require(sp_cfg, "min_per_class", where="text.split"))
 
-    print(f"[INFO] Loading eGeMAPS from: {egemaps_csv}")
-    egemaps_df = pd.read_csv(egemaps_csv)
-    if "uuid" not in egemaps_df.columns:
-        raise ValueError("eGeMAPS CSV must contain column: uuid")
-
-    egemaps_df, eg_stats = _normalize_and_dedup_uuid(egemaps_df, name="eGeMAPS")
-    if eg_stats["dropped_invalid"] > 0:
-        print(f"[WARN] eGeMAPS: dropped invalid uuid rows = {eg_stats['dropped_invalid']}")
-    if eg_stats["dropped_dups"] > 0:
-        print(f"[WARN] eGeMAPS: dropped duplicated uuid rows = {eg_stats['dropped_dups']}")
-
-    build_text_jsonl(
-        meta_df,
-        tsv_root=tsv_root,
-        output_jsonl=out_text_jsonl,
-        dataset_name=dataset_name,
-        keep_speakers=keep_speakers,
-        drop_silence=drop_silence,
-        order_by=order_by,
+    return split_and_save(
+        df_clean,
+        output_dir=output_dir,
+        train_name=train_name,
+        test_name=test_name,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify,
+        min_per_class=min_per_class,
     )
-    build_egemaps_csv(meta_df, egemaps_df, output_csv=out_egemaps_csv)
-
-    return str(out_text_jsonl), str(out_egemaps_csv)
 
 # =====================================================================
 # CLI
 # =====================================================================
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Preprocess predictive dataset (paper-strict, YAML-driven).")
+    p = argparse.ArgumentParser(description="Preprocess Chinese AD datasets (text only) - paper-strict.")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
+    p.add_argument("--skip-asr", action="store_true", help="Skip ASR CSV->JSONL step.")
     return p
 
 def cli_main() -> None:
     args = build_arg_parser().parse_args()
-    run_predictive_preprocessing(config_path=args.config)
+    run_chinese_preprocessing(config_path=args.config, skip_asr=args.skip_asr)
 
 if __name__ == "__main__":
     cli_main()
