@@ -14,7 +14,12 @@ Markers policy (paper-aligned)
 Additional rules
 ----------------
 - Collapse consecutive duplicates of: <...>, [+ gram], &-uh/&-um
-  (do NOT collapse [//] or [/]).
+  (do NOT collapse [//] or [/])
+
+TSV convention note
+-------------------
+- Some TSVs encode Chinese fillers as &嗯 / &啊 / &呃 ... (NOT CHAT markers).
+  We strip the leading '&' and keep the CJK char to avoid losing disfluencies.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ def _is_missing(x: TextLike) -> bool:
         except (TypeError, ValueError):
             return False
     return False
+
 
 def _to_str(x: TextLike) -> str:
     return "" if _is_missing(x) else str(x)
@@ -94,6 +100,10 @@ POS_TAG_PATTERN = re.compile(r"\b\w+:\w+\|\w+")
 # STRICT: keep ONLY these filled pauses
 ALLOWED_FILLPAUSES = {"uh", "um"}
 FILLPAUSE_PATTERN = re.compile(r"(?i)&-([a-z]+)")
+
+# TSV convention: "&嗯" / "&啊" / "&呃" ... -> keep the CJK char, drop leading '&'
+AMP_CJK_PATTERN = re.compile(r"&([\u4e00-\u9fff])")
+
 DROP_AMP_CODES_PATTERN = re.compile(r"&(?!(?:-[A-Za-z]+))\S+")
 
 # Researcher codes
@@ -149,6 +159,9 @@ def clean_structured_chinese(text: TextLike) -> str:
 
     # Filled pauses: keep only uh/um
     t = FILLPAUSE_PATTERN.sub(_keep_allowed_fillpause, t)
+
+    # TSV convention: keep CJK fillers with leading '&'
+    t = AMP_CJK_PATTERN.sub(r"\1", t)
 
     # Remove other [...] but keep the 3 markers
     def _drop_other_brackets(m: re.Match) -> str:
