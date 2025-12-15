@@ -50,9 +50,9 @@ asr:
     without_timestamps: true
 
 predictive:
-  meta_csv: "/content/predictive/2_final_list_train.csv"
-  egemaps_csv: "/content/predictive/egemaps_final.csv"
-  tsv_root: "/content/predictive/tsv"
+  meta_csv: "/content/NCMMSC2021_AD_Competition-dev/2_final_list_train.csv"
+  egemaps_csv: "/content/NCMMSC2021_AD_Competition-dev/egemaps_final.csv"
+  tsv_root: "/content/NCMMSC2021_AD_Competition-dev/tsv2"
   output_text_jsonl: &predictive_jsonl "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
   output_egemaps_csv: "/content/predictive_egemaps_features.csv"
   dataset_name: "Chinese_predictive_challenge"
