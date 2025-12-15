@@ -13,7 +13,14 @@ Intentionally minimal:
 Defines:
     - canonical ASR CSV schema (column names)
     - helper to open a CSV writer with correct header
-    - helper to build/write a single ASR result row (raw transcript always preserved)
+    - helper to build/write a single ASR result row
+
+Paper-strict note
+-----------------
+- In paper-strict mode, ASR writes RAW transcript only (field: `transcript`).
+- `cleaned_transcript` is kept ONLY for backward compatibility with older outputs,
+  and should remain empty unless you intentionally pass a `cleaner` to write_asr_row().
+  Downstream must use `transcript` only.
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ CSV_FIELDNAMES = (
     "id",
     "label",
     "transcript",
-    "cleaned_transcript",
+    "cleaned_transcript",  # deprecated: keep for backward compatibility; empty in paper-strict
     "audio_path",
     "duration",
 )
@@ -66,7 +73,8 @@ def build_asr_row(
     Notes
     -----
     - `transcript` always stores the raw transcript (stringified).
-    - `cleaned_transcript` is optional; only computed if `cleaner` is provided.
+    - `cleaned_transcript` is deprecated; it is only computed if `cleaner` is provided.
+      (paper-strict pipelines should not provide `cleaner` here.)
     """
     sid = "" if sample_id is None else str(sample_id).strip()
     lb = "" if label is None else str(label).strip()
@@ -74,10 +82,8 @@ def build_asr_row(
     raw = "" if raw_transcript is None else str(raw_transcript)
     ap = "" if audio_path is None else str(audio_path)
 
-    if cleaner is not None and raw:
-        cleaned = cleaner(raw)
-    else:
-        cleaned = ""
+    # Deprecated optional column
+    cleaned = cleaner(raw) if (cleaner is not None and raw) else ""
 
     try:
         dur = float(duration) if duration is not None else 0.0
