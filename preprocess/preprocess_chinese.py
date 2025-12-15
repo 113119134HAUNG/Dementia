@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-preprocess_chinese.py (paper-strict, converged)
+preprocess_chinese.py (paper-strict, converged, CV-ready)
 
 Rules:
 - Load YAML once.
 - Merge ONLY uses text.corpora (include only existing paths).
 - Dataset/label/balance/cap filtering happens ONLY in apply_subset().
 - ASR CSV MUST contain 'transcript' (no fallback).
-- label_map / language_filter / length_filter.enabled / split.stratify are YAML-driven.
+- label_map / language_filter / length_filter.enabled are YAML-driven.
 - NCMMSC dataset name MUST come from text.corpora entry matching text.ncmmsc_jsonl (fail-fast).
 - length_filter must NOT leak 'length' column to outputs (drop before return).
+- NO train/test split here (paper-aligned). Output a single cleaned.jsonl for CV scripts.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
 from collection import JSONLCombiner
 from dataset_subset import apply_subset
@@ -52,6 +52,20 @@ def _get_list(cfg: Dict[str, Any], key: str, *, where: str = "") -> List[Any]:
 
 def _resolve_path(p: Any) -> Path:
     return Path(str(p)).expanduser().resolve()
+
+def _stable_sort(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    cols: List[str] = []
+    if "Dataset" in df.columns:
+        cols.append("Dataset")
+    if "ID" in df.columns:
+        cols.append("ID")
+    if cols:
+        return df.sort_values(by=cols, kind="mergesort")
+    if "ID" in df.columns:
+        return df.sort_values(by="ID", kind="mergesort")
+    return df.sort_index(kind="mergesort")
 
 # =====================================================================
 # Step 1: ASR CSV -> NCMMSC JSONL
@@ -142,7 +156,7 @@ def normalize_diagnosis_labels(df: pd.DataFrame, *, label_map: Dict[str, Any]) -
     # paper-strict: normalize label_map keys using the SAME canonical normalizer as ADType
     mp_norm: Dict[str, str] = {}
     for k, v in (label_map or {}).items():
-        k_norm = ADType._normalize(str(k))  # canonical form: remove spaces/punct, upper
+        k_norm = ADType._normalize(str(k))
         mp_norm[k_norm] = str(v).strip()
 
     def _map_one(x: Any) -> str:
@@ -258,57 +272,30 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     lf_cfg = _get_dict(text_cfg, "length_filter", where="text")
     enabled = bool(lf_cfg.get("enabled", True))
     std_k = float(_require(lf_cfg, "std_k", where="text.length_filter"))
-    return length_filter(df, enabled=enabled, std_k=std_k)
+    df = length_filter(df, enabled=enabled, std_k=std_k)
+
+    # deterministic order for reproducibility
+    df = _stable_sort(df).reset_index(drop=True)
+    return df
 
 # =====================================================================
-# Step 7: Split + save (YAML-driven)
+# Step 7: Save cleaned.jsonl (NO split)
 # =====================================================================
-def _validate_split_feasibility(df: pd.DataFrame, *, min_per_class: int, stratify: bool) -> None:
-    if df is None or df.empty:
-        raise ValueError("No samples to split (df is empty).")
-    if "Diagnosis" not in df.columns:
-        raise ValueError("Expected column 'Diagnosis' not found.")
-
-    if stratify:
-        vc = df["Diagnosis"].value_counts()
-        if vc.size < 2:
-            raise ValueError(f"Need at least 2 classes for stratified split, got: {list(vc.index)}")
-        if (vc < int(min_per_class)).any():
-            raise ValueError(f"Each class must have >= {min_per_class} samples. Counts:\n{vc}")
-
-def split_and_save(
+def save_cleaned_jsonl(
     df: pd.DataFrame,
     *,
-    output_dir: str,
-    train_name: str,
-    test_name: str,
-    test_size: float,
-    random_state: int,
-    stratify: bool,
-    min_per_class: int,
-) -> Tuple[str, str]:
-    _validate_split_feasibility(df, min_per_class=min_per_class, stratify=stratify)
+    output_path: str,
+) -> str:
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
 
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if df is None:
+        raise ValueError("df is None (nothing to save).")
 
-    strat = df["Diagnosis"] if stratify else None
-    train_df, test_df = train_test_split(
-        df,
-        test_size=float(test_size),
-        stratify=strat,
-        random_state=int(random_state),
-    )
-
-    train_out = out_dir / train_name
-    test_out = out_dir / test_name
-
-    train_df.to_json(train_out, orient="records", lines=True, force_ascii=False)
-    test_df.to_json(test_out, orient="records", lines=True, force_ascii=False)
-
-    print(f"[INFO] Saved train split to: {train_out}")
-    print(f"[INFO] Saved test  split to: {test_out}")
-    return str(train_out), str(test_out)
+    df = _stable_sort(df).reset_index(drop=True)
+    df.to_json(out_p, orient="records", lines=True, force_ascii=False)
+    print(f"[INFO] Saved cleaned JSONL to: {out_p} (n={len(df)})")
+    return str(out_p)
 
 # =====================================================================
 # Orchestrator
@@ -321,8 +308,11 @@ def run_chinese_preprocessing(config_path: Optional[str] = None, skip_asr: bool 
     ncmmsc_jsonl = _require(text_cfg, "ncmmsc_jsonl", where="text")
     output_dir = _require(text_cfg, "output_dir", where="text")
     merged_name = _require(text_cfg, "combined_name", where="text")
-    train_name = _require(text_cfg, "train_jsonl", where="text")
-    test_name = _require(text_cfg, "test_jsonl", where="text")
+
+    # NEW: cleaned output path (config optional; fallback to output_dir/cleaned.jsonl)
+    cleaned_jsonl = text_cfg.get("cleaned_jsonl")
+    if cleaned_jsonl is None:
+        cleaned_jsonl = str(Path(output_dir) / "cleaned.jsonl")
 
     corpora = _get_list(text_cfg, "corpora", where="text")
 
@@ -350,29 +340,16 @@ def run_chinese_preprocessing(config_path: Optional[str] = None, skip_asr: bool 
     # Step 3-6
     df_clean = load_and_process_chinese(merged_path, text_cfg)
 
-    # Step 7 (YAML-driven)
-    sp_cfg = _get_dict(text_cfg, "split", where="text")
-    test_size = float(_require(sp_cfg, "test_size", where="text.split"))
-    random_state = int(_require(sp_cfg, "random_state", where="text.split"))
-    stratify = bool(sp_cfg.get("stratify", True))
-    min_per_class = int(_require(sp_cfg, "min_per_class", where="text.split"))
+    # Step 7 (save single cleaned set)
+    cleaned_path = save_cleaned_jsonl(df_clean, output_path=str(cleaned_jsonl))
 
-    return split_and_save(
-        df_clean,
-        output_dir=output_dir,
-        train_name=train_name,
-        test_name=test_name,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=stratify,
-        min_per_class=min_per_class,
-    )
+    return str(merged_path), str(cleaned_path)
 
 # =====================================================================
 # CLI
 # =====================================================================
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Preprocess Chinese AD datasets (text only) - paper-strict.")
+    p = argparse.ArgumentParser(description="Preprocess Chinese AD datasets (text only) - paper-strict (no split).")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
     p.add_argument("--skip-asr", action="store_true", help="Skip ASR CSV->JSONL step.")
     return p
