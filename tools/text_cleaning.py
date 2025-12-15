@@ -27,24 +27,28 @@ from __future__ import annotations
 import re
 from typing import Union
 
-import pandas as pd
-
 TextLike = Union[str, float]
 
 # =====================================================================
 # Small helpers (no extra deps)
 # =====================================================================
 def _is_missing(x: TextLike) -> bool:
-    return x is None or (isinstance(x, float) and pd.isna(x))
+    # Treat None / float NaN as missing. (Pandas reads CSV missing as float NaN)
+    return x is None or (isinstance(x, float) and x != x)  # NaN != NaN
 
 
 def _to_str(x: TextLike) -> str:
     return "" if _is_missing(x) else str(x)
 
 # =====================================================================
+# Shared regex
+# =====================================================================
+WS_PATTERN = re.compile(r"\s+")
+BRACKET_ANY_PATTERN = re.compile(r"\[[^\]]*\]")
+
+# =====================================================================
 # ASR-level cleaning
 # =====================================================================
-# Zhuyin code point range: collapse sequences to a single "嗯"
 ZHUYIN_PATTERN = re.compile(
     r"[ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒ"
     r"ㄓㄔㄕㄖㄗㄘㄙ"
@@ -52,10 +56,7 @@ ZHUYIN_PATTERN = re.compile(
     r"ㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ]+"
 )
 
-# Multiple "嗯" possibly separated by punctuation/space -> single
 MULTI_HMM_PATTERN = re.compile(r"(嗯[\s、，,.!?]*){2,}")
-
-WS_PATTERN = re.compile(r"\s+")
 
 def clean_asr_chinese(text: TextLike) -> str:
     """Light cleaning for Chinese ASR output."""
@@ -70,43 +71,29 @@ def clean_asr_chinese(text: TextLike) -> str:
     return t
 
 # =====================================================================
-# Structured transcript cleaning (paper-aligned: keep key markers)
+# Structured transcript cleaning (paper-aligned)
 # =====================================================================
-# Normalize pause marker: < . . . > or similar -> <...>
-PAUSE_PATTERN = re.compile(r"<\s*(?:\.\s*){3,}>")
+PAUSE_PATTERN = re.compile(r"<\s*(?:\.\s*){3,}>")  # < . . . > -> <...>
+GRAM_PATTERN = re.compile(r"\[\+\s*gram\s*\]", flags=re.IGNORECASE)  # -> [+ gram]
 
-# Normalize [+ gram] variants -> [+ gram]
-GRAM_PATTERN = re.compile(r"\[\+\s*gram\s*\]", flags=re.IGNORECASE)
-
-# Keep these bracket markers exactly
 KEEP_BRACKET_MARKERS = {"[//]", "[/]", "[+ gram]"}
 
-# Speaker labels
 SPEAKER_EN_PATTERN = re.compile(r"\b(Doctor|Patient|Interviewer)\s*[:：]", flags=re.IGNORECASE)
 SPEAKER_NUM_PATTERN = re.compile(r"Speaker\s*\d+\s*[:：]", flags=re.IGNORECASE)
 SPEAKER_ZH_PATTERN = re.compile(r"(醫生|病人|受試者)\s*[:：]")
 
-# .cha-like markers
 TIME_CODE_PATTERN = re.compile(r"\d+_\d+")
 MOR_PAR_PATTERN = re.compile(r"(%\w+|\*[A-Z]+):")
 POS_TAG_PATTERN = re.compile(r"\b\w+:\w+\|\w+")
 
-# Filled pauses: keep only &-word (letters)
-FILLPAUSE_PATTERN = re.compile(r"(?i)&-([a-z]+)")
+FILLPAUSE_PATTERN = re.compile(r"(?i)&-([a-z]+)")                 # keep only &-letters
+DROP_AMP_CODES_PATTERN = re.compile(r"&(?!(?:-[A-Za-z]+))\S+")    # drop other &codes
 
-# Remove &codes except &-word
-DROP_AMP_CODES_PATTERN = re.compile(r"&(?!(?:-[A-Za-z]+))\S+")
-
-# Researcher codes
 DROP_PLUS_ANGLE_PATTERN = re.compile(r"\+<[^>]*>")
 DROP_PLUS_CODE_PATTERN = re.compile(r"\+[^ ]+")
 
-# Remove (...) content
 PAREN_PATTERN = re.compile(r"\([^)]*\)")
-
-# Remove <...> content except the literal pause token "<...>"
-# (after PAUSE_PATTERN normalization)
-DROP_ANGLE_EXCEPT_PAUSE_PATTERN = re.compile(r"<(?!\.\.\.>)[^>]*>")
+DROP_ANGLE_EXCEPT_PAUSE_PATTERN = re.compile(r"<(?!\.\.\.>)[^>]*>")  # keep literal <...>
 
 def clean_structured_chinese(text: TextLike) -> str:
     """Remove speaker tags and most CHAT annotations, while keeping key markers."""
@@ -139,7 +126,7 @@ def clean_structured_chinese(text: TextLike) -> str:
         s_norm = WS_PATTERN.sub(" ", s.strip())
         return s_norm if s_norm in KEEP_BRACKET_MARKERS else " "
 
-    t = re.sub(r"\[[^\]]*\]", _drop_other_brackets, t)
+    t = BRACKET_ANY_PATTERN.sub(_drop_other_brackets, t)
 
     # Remove other <...> (except literal "<...>")
     t = DROP_ANGLE_EXCEPT_PAUSE_PATTERN.sub(" ", t)
@@ -161,6 +148,12 @@ def clean_structured_chinese(text: TextLike) -> str:
     t = WS_PATTERN.sub(" ", t).strip()
     return t
 
+# =====================================================================
+# No punctuation variant
+# =====================================================================
+PUNCT_PATTERN = re.compile(r"[，。、「」『』？！：；（）《》〈〉——…,.!?;:()\"“”'\-]")
+KEEP_BASIC_CHARS_PATTERN = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9_\s]")
+
 def clean_structured_chinese_no_punct(text: TextLike) -> str:
     """Structured cleaning + punctuation removal.
 
@@ -178,10 +171,8 @@ def clean_structured_chinese_no_punct(text: TextLike) -> str:
     t = t.replace("<...>", " PAUSE ")
     t = FILLPAUSE_PATTERN.sub(r" FILLPAUSE_\1 ", t)
 
-    # Replace punctuation with spaces
-    t = re.sub(r"[，。、「」『』？！：；（）《》〈〉——…,.!?;:()\"“”'\-]", " ", t)
-
-    # Keep only CJK, ASCII letters/digits, underscore, spaces
-    t = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9_\s]", " ", t)
+    # Strip punctuation/symbols
+    t = PUNCT_PATTERN.sub(" ", t)
+    t = KEEP_BASIC_CHARS_PATTERN.sub(" ", t)
     t = WS_PATTERN.sub(" ", t).strip()
     return t
