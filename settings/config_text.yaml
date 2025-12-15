@@ -99,6 +99,12 @@ text:
   train_jsonl: "train_chinese.jsonl"
   test_jsonl: "test_chinese.jsonl"
 
+  target_datasets: ["NCMMSC2021_AD_Competition"]   # 只用 NCMMSC
+  target_labels: ["AD", "HC"]                      # binary：AD vs HC
+  balance: true                                    # 類別平衡（抽到同數）
+  subset_seed: 42
+  cap_per_class: 300                               # debug 快速跑
+
 # ---------------------------------------------------------------------
 #    Text features + classifiers (TF-IDF / BERT / GloVe / Gemma)
 #    + K-fold cross-validation
