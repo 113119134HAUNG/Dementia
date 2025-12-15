@@ -141,7 +141,7 @@ features:
     embeddings_path: "/content/embeddings/cc.zh.300.vec"
     embedding_dim: 300
     tokenizer: "jieba"
-    max_words: 200000
+    max_words: 50000
     lowercase: false
     remove_stopwords: false
     stopwords_lang: null
