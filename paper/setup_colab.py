@@ -181,7 +181,6 @@ def hf_login_and_download(
     hf_token: Optional[str],
     interactive: bool,
 ) -> List[Path]:
-    # Use /content caches for Colab (faster / avoids filling home)
     os.environ.setdefault("HF_HOME", "/content/hf")
     os.environ.setdefault("TRANSFORMERS_CACHE", "/content/hf/transformers")
     os.environ.setdefault("HF_HUB_CACHE", "/content/hf/hub")
@@ -210,46 +209,36 @@ def hf_login_and_download(
         except Exception:
             return ""
 
-    # Priority:
-    # 1) --hf-token
-    # 2) env HF_TOKEN (if valid)
-    # 3) Colab Secrets (FACE)
-    # 4) prompt (if interactive)
-    token = (hf_token or "").strip()
+    # ✅ Priority: arg > Colab Secrets(FACE) > env
+    token_arg = (hf_token or "").strip()
+    token_secret = get_colab_secret_token("FACE")
+    token_env = (os.environ.get("HF_TOKEN", "") or "").strip()
 
-    if not token:
-        token = (os.environ.get("HF_TOKEN", "") or "").strip()
-
+    token = token_arg or token_secret or token_env
     who = try_whoami(token) if token else None
 
-    # If missing OR invalid, try Colab Secret (FACE)
-    if not who:
-        secret_tok = get_colab_secret_token("FACE")
-        secret_who = try_whoami(secret_tok)
-        if secret_who:
-            token = secret_tok
-            who = secret_who
-        elif token:  # had a token but invalid
-            print(
-                "[WARN] HF_TOKEN seems invalid.\n"
-                "       If you set HF_TOKEN in Colab Secrets (🔑), update/remove it.\n"
-                "       Tried Secrets key 'FACE' but it was missing/invalid."
-            )
+    # 如果選到的 token 無效，而且 Secrets 有值，就用 Secrets 再試一次（避免被舊 env HF_TOKEN 干擾）
+    if not who and token_secret:
+        token = token_secret
+        who = try_whoami(token)
 
-    # If still not ok, prompt if interactive
+    # still invalid -> prompt only if interactive
     if not who and interactive:
         from getpass import getpass
         token = getpass("Paste your Hugging Face token (hidden): ").strip()
         who = try_whoami(token) if token else None
 
     if token and who:
-        # Force current process to use the valid token (overrides injected bad env values)
-        os.environ["HF_TOKEN"] = token
+        os.environ["HF_TOKEN"] = token  # 強制本進程用這個（覆蓋可能的錯 env）
         login(token=token)
         print("[OK] HF login:", who)
     else:
-        print("[WARN] No valid HF token. Public models may still download; gated models will fail.")
-        token = ""  # normalize
+        print(
+            "[WARN] No valid HF token.\n"
+            "       Check Colab Secrets (🔑) key 'FACE' exists and is a valid hf_... token.\n"
+            "       If you want NO prompt, run with --no-interactive."
+        )
+        token = ""
 
     ensure_dir(models_dir)
     local_paths: List[Path] = []
@@ -263,7 +252,6 @@ def hf_login_and_download(
         local_dir = models_dir / subdir
         ensure_dir(local_dir)
 
-        # Skip if folder already has content
         try:
             if any(local_dir.iterdir()):
                 print(f"[INFO] Model exists, skip: {repo_id} -> {local_dir}")
@@ -283,7 +271,7 @@ def hf_login_and_download(
             local_paths.append(local_dir)
             print(f"[OK] {repo_id} -> {local_dir}")
         except Exception as e:
-            print(f"[WARN] Failed: {repo_id}  (common: gated model / license not accepted / no permission)")
+            print(f"[WARN] Failed: {repo_id}  (common: gated / license not accepted / no permission)")
             print(f"       Error: {repr(e)}")
 
     return local_paths
