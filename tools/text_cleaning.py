@@ -4,10 +4,17 @@ text_cleaning.py
 
 Text cleaning utilities (paper-aligned, strict + minimal).
 
-- Keep ONLY:
-  &-uh / &-um, [//], [/], <...>, [+ gram]
+Markers policy (paper-aligned)
+------------------------------
+- In CHAT-style *annotation markers*, keep ONLY:
+    &-uh / &-um, [//], [/], <...>, [+ gram]
+- All other annotation markers are removed.
+- Lexical content (Chinese/English words) is preserved.
+
+Additional rules
+----------------
 - Collapse consecutive duplicates of: <...>, [+ gram], &-uh/&-um
-  (do NOT collapse [//] or [/])
+  (do NOT collapse [//] or [/]).
 """
 
 from __future__ import annotations
@@ -34,19 +41,17 @@ def _is_missing(x: TextLike) -> bool:
             return False
     return False
 
-
 def _to_str(x: TextLike) -> str:
     return "" if _is_missing(x) else str(x)
 
 # =====================================================================
 # Shared regex
 # =====================================================================
-
 WS_PATTERN = re.compile(r"\s+")
 BRACKET_ANY_PATTERN = re.compile(r"\[[^\]]*\]")
 
 # =====================================================================
-# ASR-level cleaning
+# ASR-level cleaning (light, deterministic)
 # =====================================================================
 ZHUYIN_PATTERN = re.compile(
     r"[ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒ"
@@ -91,13 +96,19 @@ ALLOWED_FILLPAUSES = {"uh", "um"}
 FILLPAUSE_PATTERN = re.compile(r"(?i)&-([a-z]+)")
 DROP_AMP_CODES_PATTERN = re.compile(r"&(?!(?:-[A-Za-z]+))\S+")
 
+# Researcher codes
 DROP_PLUS_ANGLE_PATTERN = re.compile(r"\+<[^>]*>")
-DROP_PLUS_CODE_PATTERN = re.compile(r"\+[^ ]+")
+
+# IMPORTANT: be conservative to avoid killing lexical forms like "C++"
+# Only drop "+CODE" when it looks like a standalone annotation token:
+#   - starts with '+' AND followed by letters/digits/underscore/hyphen
+#   - bounded by whitespace or string edges
+DROP_PLUS_CODE_PATTERN = re.compile(r"(?:(?<=\s)|^)\+[A-Za-z0-9_-]+(?=(?:\s|$))")
 
 PAREN_PATTERN = re.compile(r"\([^)]*\)")
 DROP_ANGLE_EXCEPT_PAUSE_PATTERN = re.compile(r"<(?!\.\.\.>)[^>]*>")  # keep literal <...>
 
-# appropriate: collapse consecutive duplicates (only these)
+# collapse consecutive duplicates (only these)
 DUP_PAUSE_PATTERN = re.compile(r"(<\.\.\.>)(?:\s+\1)+")
 DUP_GRAM_PATTERN = re.compile(r"(\[\+\s*gram\])(?:\s+\1)+", flags=re.IGNORECASE)
 DUP_FILLPAUSE_PATTERN = re.compile(r"(&-(?:uh|um))(?:\s+\1)+", flags=re.IGNORECASE)
@@ -150,17 +161,15 @@ def clean_structured_chinese(text: TextLike) -> str:
     # Remove other <...> (except literal "<...>")
     t = DROP_ANGLE_EXCEPT_PAUSE_PATTERN.sub(" ", t)
 
-    # Remove (...)
+    # Remove (...), misc symbols
     t = PAREN_PATTERN.sub(" ", t)
-
-    # Misc symbols
     t = t.replace("‡", " ")
 
     # Researcher codes
     t = DROP_PLUS_ANGLE_PATTERN.sub(" ", t)
     t = DROP_PLUS_CODE_PATTERN.sub(" ", t)
 
-    # Remove &codes except &-word (we already normalized/dropped &-*)
+    # Remove &codes except &-word (we already normalized/dropped &-* above)
     t = DROP_AMP_CODES_PATTERN.sub(" ", t)
 
     # Final whitespace + appropriate collapse
