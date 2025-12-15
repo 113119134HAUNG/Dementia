@@ -69,7 +69,9 @@ predictive:
   dataset_name: "Chinese_predictive_challenge"
 
   # preprocess_predictive.py currently reads predictive.keep_speakers
-  keep_speakers: &pred_keep_speakers null  # e.g. ["<B>"] ; null = keep all
+  # 建議：排除 <NOISE> speaker，避免把 LAUGH/NOISE token 拼進文本
+  # 如果你只想保留單一說話者（例如只留受試者），就把 ["<A>", "<B>"] 改成 ["<B>"] 或你的標記
+  keep_speakers: &pred_keep_speakers ["<A>", "<B>"]  # null = keep all
 
   # future knobs (optional; keep as alias so it's never inconsistent)
   tsv:
