@@ -4,38 +4,37 @@ asr_io.py
 
 I/O utilities for ASR outputs in this project.
 
+Intentionally minimal:
+- No CLI
+- No config loading
+- No printing
+- No dependency on text_cleaning (caller injects cleaner if needed)
+
 Defines:
-    - the canonical ASR CSV schema (column names)
-    - helper to open a CSV writer with the correct header
-    - helper to write a single ASR result row, including light cleaning
+    - canonical ASR CSV schema (column names)
+    - helper to open a CSV writer with correct header
+    - helper to build/write a single ASR result row (raw transcript always preserved)
 """
 
 from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import TextIO, Tuple
-
-from text_cleaning import clean_asr_chinese
+from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
 # =====================================================================
 # Canonical CSV schema
 # =====================================================================
-#: ASR CSV columns:
-#:   - id                 : unique ID (e.g. "AD_0001")
-#:   - label              : diagnosis label (AD / HC / MCI)
-#:   - transcript         : raw Whisper transcript
-#:   - cleaned_transcript : lightly cleaned transcript (for downstream NLP)
-#:   - audio_path         : original audio path
-#:   - duration           : audio length (seconds)
-CSV_FIELDNAMES = [
+CSV_FIELDNAMES = (
     "id",
     "label",
     "transcript",
     "cleaned_transcript",
     "audio_path",
     "duration",
-]
+)
+
+Cleaner = Callable[[str], str]
 
 # =====================================================================
 # File opening helper
@@ -46,46 +45,71 @@ def open_asr_csv_writer(output_csv: Path) -> Tuple[TextIO, csv.DictWriter]:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     fp = output_csv.open("w", newline="", encoding="utf-8-sig")
-    writer = csv.DictWriter(fp, fieldnames=CSV_FIELDNAMES)
+    writer = csv.DictWriter(fp, fieldnames=list(CSV_FIELDNAMES))
     writer.writeheader()
     return fp, writer
 
 # =====================================================================
-# Write single result row (with cleaning)
+# Row builder + writer
 # =====================================================================
-def write_asr_row_with_cleaning(
-    writer: csv.DictWriter,
+def build_asr_row(
     *,
-    sample_id: str,
-    label: str,
-    raw_transcript: str,
-    audio_path: str,
-    duration: float,
-) -> None:
-    """Write a single ASR result into the CSV, including transcript cleaning.
+    sample_id: Any,
+    label: Any,
+    raw_transcript: Any,
+    audio_path: Any,
+    duration: Any,
+    cleaner: Optional[Cleaner] = None,
+) -> Dict[str, Any]:
+    """Build one ASR CSV row dict.
 
-    Cleaning logic is delegated to :func:`text_cleaning.clean_asr_chinese`.
-    Raw transcript is always preserved in the `transcript` column.
+    Notes
+    -----
+    - `transcript` always stores the raw transcript (stringified).
+    - `cleaned_transcript` is optional; only computed if `cleaner` is provided.
     """
     sid = "" if sample_id is None else str(sample_id).strip()
     lb = "" if label is None else str(label).strip()
+
     raw = "" if raw_transcript is None else str(raw_transcript)
     ap = "" if audio_path is None else str(audio_path)
 
-    cleaned = clean_asr_chinese(raw) if raw else ""
+    if cleaner is not None and raw:
+        cleaned = cleaner(raw)
+    else:
+        cleaned = ""
 
     try:
         dur = float(duration) if duration is not None else 0.0
     except (TypeError, ValueError):
         dur = 0.0
 
-    writer.writerow(
-        {
-            "id": sid,
-            "label": lb,
-            "transcript": raw,
-            "cleaned_transcript": cleaned,
-            "audio_path": ap,
-            "duration": dur,
-        }
+    return {
+        "id": sid,
+        "label": lb,
+        "transcript": raw,
+        "cleaned_transcript": cleaned,
+        "audio_path": ap,
+        "duration": dur,
+    }
+
+def write_asr_row(
+    writer: csv.DictWriter,
+    *,
+    sample_id: Any,
+    label: Any,
+    raw_transcript: Any,
+    audio_path: Any,
+    duration: Any,
+    cleaner: Optional[Cleaner] = None,
+) -> None:
+    """Write a single ASR row to CSV (raw transcript preserved)."""
+    row = build_asr_row(
+        sample_id=sample_id,
+        label=label,
+        raw_transcript=raw_transcript,
+        audio_path=audio_path,
+        duration=duration,
+        cleaner=cleaner,
     )
+    writer.writerow(row)
