@@ -1,5 +1,5 @@
 # =====================================================================
-# config_text.yaml (single source of truth)
+# config_text.yaml (single source of truth, paper-strict, converged)
 # =====================================================================
 
 common:
@@ -68,14 +68,14 @@ predictive:
 
   dataset_name: "Chinese_predictive_challenge"
 
-  # optional (if your preprocess_predictive.py reads it)
-  keep_speakers: null        # e.g. ["<B>"] ; null = keep all
+  # preprocess_predictive.py currently reads predictive.keep_speakers
+  keep_speakers: &pred_keep_speakers null  # e.g. ["<B>"] ; null = keep all
 
-  # keep for future knobs (even if current code doesn't consume them yet)
+  # future knobs (optional; keep as alias so it's never inconsistent)
   tsv:
-    keep_speakers: null      # e.g. ["<B>"] ; null = keep all
-    drop_silence: true       # drop rows where value == "sil"
-    order_by: "no"           # "no" | "start_time" | null
+    keep_speakers: *pred_keep_speakers
+    drop_silence: true
+    order_by: "no"   # "no" | "start_time" | null
 
 # ---------------------------------------------------------------------
 # Text preprocessing & dataset merging
