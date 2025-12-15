@@ -13,8 +13,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
 from sklearn import metrics
+from sklearn.linear_model import LogisticRegression
+
 
 def build_logreg(cfg: Dict[str, Any]) -> LogisticRegression:
     C = float(cfg.get("C", 1.0))
@@ -144,8 +145,12 @@ def evaluate_tfidf_trainonly(
     cms: List[List[List[int]]] = []
 
     for fold_i, (tr, te) in enumerate(folds, start=1):
-        Xtr_txt = [X_text[i] for i in tr.tolist()]
-        Xte_txt = [X_text[i] for i in te.tolist()]
+        # folds store numpy arrays already, but be defensive
+        tr_idx = tr.tolist() if hasattr(tr, "tolist") else list(tr)
+        te_idx = te.tolist() if hasattr(te, "tolist") else list(te)
+
+        Xtr_txt = [X_text[i] for i in tr_idx]
+        Xte_txt = [X_text[i] for i in te_idx]
 
         Xtr, Xte = tfidf_features_fold_fit(
             Xtr_txt,
