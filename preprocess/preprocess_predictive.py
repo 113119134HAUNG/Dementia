@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-preprocess_predictive.py (paper-strict)
+preprocess_predictive.py (paper-strict, converged)
 
 - Load YAML once.
 - TSV parsing behavior is driven by predictive.tsv:
     keep_speakers / drop_silence / order_by
 - dataset_name is driven by predictive.dataset_name
+- paper-strict:
+    * if order_by is set, required TSV columns MUST exist (fail-fast, no silent fallback)
+    * deterministic output order via sorting by uuid after dedup
 """
 
 from __future__ import annotations
@@ -71,7 +74,7 @@ def _normalize_and_dedup_uuid(df: pd.DataFrame, *, name: str) -> Tuple[pd.DataFr
     return out.reset_index(drop=True), {"dropped_invalid": dropped_invalid, "dropped_dups": dropped_dups}
 
 # =====================================================================
-# TSV -> long-form text (YAML-driven)
+# TSV -> long-form text (YAML-driven, fail-fast)
 # =====================================================================
 def tsv_to_text(
     tsv_path: Path,
@@ -91,10 +94,15 @@ def tsv_to_text(
         ks = {str(x).strip() for x in keep_speakers if str(x).strip()}
         df = df[df["speaker"].astype(str).str.strip().isin(ks)]
 
-    if order_by == "no" and "no" in df.columns:
+    # paper-strict: if order_by is specified, required columns MUST exist (no silent fallback)
+    if order_by == "no":
+        if "no" not in df.columns:
+            raise ValueError(f"TSV file {tsv_path} missing required column 'no' for order_by='no'.")
         df["_no"] = pd.to_numeric(df["no"], errors="coerce")
         df = df.sort_values(by="_no", kind="mergesort").drop(columns=["_no"])
-    elif order_by == "start_time" and "start_time" in df.columns:
+    elif order_by == "start_time":
+        if "start_time" not in df.columns:
+            raise ValueError(f"TSV file {tsv_path} missing required column 'start_time' for order_by='start_time'.")
         df["_st"] = pd.to_numeric(df["start_time"], errors="coerce")
         df = df.sort_values(by="_st", kind="mergesort").drop(columns=["_st"])
 
@@ -219,6 +227,10 @@ def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str
     if meta_stats["dropped_dups"] > 0:
         print(f"[WARN] meta: dropped duplicated uuid rows = {meta_stats['dropped_dups']}")
 
+    # deterministic order for reproducible JSONL writing
+    if meta_df is not None and not meta_df.empty:
+        meta_df = meta_df.sort_values(by="uuid", kind="mergesort").reset_index(drop=True)
+
     meta_df["Diagnosis"] = meta_df["label"].apply(lambda s: ADType.from_any(s).value)
 
     print(f"[INFO] Loading eGeMAPS from: {egemaps_csv}")
@@ -231,6 +243,10 @@ def run_predictive_preprocessing(config_path: Optional[str] = None) -> Tuple[str
         print(f"[WARN] eGeMAPS: dropped invalid uuid rows = {eg_stats['dropped_invalid']}")
     if eg_stats["dropped_dups"] > 0:
         print(f"[WARN] eGeMAPS: dropped duplicated uuid rows = {eg_stats['dropped_dups']}")
+
+    # deterministic order for reproducible merges/outputs
+    if egemaps_df is not None and not egemaps_df.empty:
+        egemaps_df = egemaps_df.sort_values(by="uuid", kind="mergesort").reset_index(drop=True)
 
     build_text_jsonl(
         meta_df,
