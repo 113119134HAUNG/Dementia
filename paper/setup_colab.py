@@ -194,30 +194,56 @@ def hf_login_and_download(
         raise ImportError("huggingface_hub is required. Run with --install first.") from e
 
     def try_whoami(tok: str) -> Optional[str]:
+        tok = (tok or "").strip()
+        if not tok:
+            return None
         try:
             who = HfApi(token=tok).whoami()
             return who.get("name") or who.get("email") or "unknown"
         except Exception:
             return None
 
-    # Priority: --hf-token > env HF_TOKEN > prompt (if interactive)
-    token = (hf_token or os.environ.get("HF_TOKEN", "")).strip()
+    def get_colab_secret_token(secret_key: str = "FACE") -> str:
+        try:
+            from google.colab import userdata  # type: ignore
+            return (userdata.get(secret_key) or "").strip()
+        except Exception:
+            return ""
+
+    # Priority:
+    # 1) --hf-token
+    # 2) env HF_TOKEN (if valid)
+    # 3) Colab Secrets (FACE)
+    # 4) prompt (if interactive)
+    token = (hf_token or "").strip()
+
+    if not token:
+        token = (os.environ.get("HF_TOKEN", "") or "").strip()
 
     who = try_whoami(token) if token else None
-    if token and not who:
-        print(
-            "[WARN] HF token seems invalid.\n"
-            "       If you set HF_TOKEN in Colab Secrets (🔑), update/remove it.\n"
-            "       We'll prompt for a new token if interactive mode is enabled."
-        )
-        if interactive:
-            from getpass import getpass
 
-            token = getpass("Paste your Hugging Face token (hidden): ").strip()
-            who = try_whoami(token) if token else None
+    # If missing OR invalid, try Colab Secret (FACE)
+    if not who:
+        secret_tok = get_colab_secret_token("FACE")
+        secret_who = try_whoami(secret_tok)
+        if secret_who:
+            token = secret_tok
+            who = secret_who
+        elif token:  # had a token but invalid
+            print(
+                "[WARN] HF_TOKEN seems invalid.\n"
+                "       If you set HF_TOKEN in Colab Secrets (🔑), update/remove it.\n"
+                "       Tried Secrets key 'FACE' but it was missing/invalid."
+            )
+
+    # If still not ok, prompt if interactive
+    if not who and interactive:
+        from getpass import getpass
+        token = getpass("Paste your Hugging Face token (hidden): ").strip()
+        who = try_whoami(token) if token else None
 
     if token and who:
-        # Ensure THIS process uses the valid token (overrides injected env values)
+        # Force current process to use the valid token (overrides injected bad env values)
         os.environ["HF_TOKEN"] = token
         login(token=token)
         print("[OK] HF login:", who)
@@ -237,7 +263,7 @@ def hf_login_and_download(
         local_dir = models_dir / subdir
         ensure_dir(local_dir)
 
-        # If already has any file, assume it was downloaded previously and skip
+        # Skip if folder already has content
         try:
             if any(local_dir.iterdir()):
                 print(f"[INFO] Model exists, skip: {repo_id} -> {local_dir}")
@@ -252,7 +278,7 @@ def hf_login_and_download(
                 repo_id=repo_id,
                 local_dir=str(local_dir),
                 token=(token or None),
-                local_dir_use_symlinks=False,  # kept for backward compat; harmless if ignored
+                local_dir_use_symlinks=False,
             )
             local_paths.append(local_dir)
             print(f"[OK] {repo_id} -> {local_dir}")
