@@ -27,6 +27,11 @@ NEW (robustness)
     [聽不清楚], 【聽不清楚】 -> 【聽不清楚】
 - Collapse consecutive duplicates of 【聽不清楚】
 - Sanitize weird unicode (e.g., ﻌﻌﻌ) via a conservative allowlist
+
+NEW (ASR prompt filter)
+----------------------
+- ASR may contain interviewer prompts (no speaker tags).
+- We provide prompt_filter_text(): remove prompt-like sentences conservatively.
 """
 
 from __future__ import annotations
@@ -71,20 +76,17 @@ UNK_ANY_PATTERN = re.compile(r"[\[\【]\s*聽不清楚\s*[\]\】]")
 UNK_DUP_PATTERN = re.compile(rf"(?:{re.escape(UNK_TOKEN)}\s*){{2,}}")
 
 def _normalize_unk(t: str) -> str:
-    # unify all variants to UNK_TOKEN
     t = UNK_ANY_PATTERN.sub(UNK_TOKEN, t)
-    # collapse duplicates
     t = UNK_DUP_PATTERN.sub(f"{UNK_TOKEN} ", t)
     return t
 
 # =====================================================================
 # Weird unicode sanitizer (allowlist)
-#   - keeps Chinese, Latin, digits, common punctuation, and CHAT markers symbols
 # =====================================================================
 _ALLOWED_CHARS_PATTERN = re.compile(
     r"[^\u4e00-\u9fffA-Za-z0-9\s"
     r"\[\]\(\)<>"
-    r"&\+\-_/\\"
+    r"&\+\-_/\\"          # keep some marker symbols
     r"，。！？；：、（）「」『』《》…【】"
     r"\.,!?;:\"“”'·]+"
 )
@@ -113,19 +115,14 @@ def clean_asr_chinese(text: TextLike) -> str:
     if not t:
         return ""
 
-    # normalize UNK variants early
     t = _normalize_unk(t)
 
-    # Zhuyin -> "嗯" (paper-aligned)
     t = ZHUYIN_PATTERN.sub("嗯", t)
     t = MULTI_HMM_PATTERN.sub("嗯 ", t)
 
-    # sanitize weird unicode (fixes ﻌﻌﻌ-like garbage)
     t = sanitize_weird_unicode(t)
 
-    # keep UNK token (do NOT delete here; quality_filter will handle high-UNK cases)
     t = _normalize_unk(t)
-
     t = WS_PATTERN.sub(" ", t).strip()
     return t
 
@@ -135,7 +132,6 @@ def clean_asr_chinese(text: TextLike) -> str:
 PAUSE_PATTERN = re.compile(r"<\s*(?:\.\s*){3,}>")  # < . . . > -> <...>
 GRAM_PATTERN = re.compile(r"\[\+\s*gram\s*\]", flags=re.IGNORECASE)  # -> [+ gram]
 
-# Normalize retrace/repeat variants (allow spaces inside)
 RETRACE_PATTERN = re.compile(r"\[\s*//\s*\]")
 REPEAT_PATTERN = re.compile(r"\[\s*/\s*\]")
 
@@ -149,26 +145,18 @@ TIME_CODE_PATTERN = re.compile(r"\d+_\d+")
 MOR_PAR_PATTERN = re.compile(r"(%\w+|\*[A-Z]+):")
 POS_TAG_PATTERN = re.compile(r"\b\w+:\w+\|\w+")
 
-# STRICT: keep ONLY these filled pauses
 ALLOWED_FILLPAUSES = {"uh", "um"}
 FILLPAUSE_PATTERN = re.compile(r"(?i)&-([a-z]+)")
 
-# TSV convention: "&嗯" / "&啊" / "&呃" ... -> keep the CJK char, drop leading '&'
 AMP_CJK_PATTERN = re.compile(r"&([\u4e00-\u9fff])")
-
 DROP_AMP_CODES_PATTERN = re.compile(r"&(?!(?:-[A-Za-z]+))\S+")
 
-# Researcher codes
 DROP_PLUS_ANGLE_PATTERN = re.compile(r"\+<[^>]*>")
-
-# IMPORTANT: be conservative to avoid killing lexical forms like "C++"
-# Only drop "+CODE" when it looks like a standalone annotation token:
 DROP_PLUS_CODE_PATTERN = re.compile(r"(?:(?<=\s)|^)\+[A-Za-z0-9_-]+(?=(?:\s|$))")
 
 PAREN_PATTERN = re.compile(r"\([^)]*\)")
-DROP_ANGLE_EXCEPT_PAUSE_PATTERN = re.compile(r"<(?!\.\.\.>)[^>]*>")  # keep literal <...>
+DROP_ANGLE_EXCEPT_PAUSE_PATTERN = re.compile(r"<(?!\.\.\.>)[^>]*>")
 
-# collapse consecutive duplicates (only these)
 DUP_PAUSE_PATTERN = re.compile(r"(<\.\.\.>)(?:\s+\1)+")
 DUP_GRAM_PATTERN = re.compile(r"(\[\+\s*gram\])(?:\s+\1)+", flags=re.IGNORECASE)
 DUP_FILLPAUSE_PATTERN = re.compile(r"(&-(?:uh|um))(?:\s+\1)+", flags=re.IGNORECASE)
@@ -189,64 +177,116 @@ def clean_structured_chinese(text: TextLike) -> str:
         return ""
 
     t = t.replace("\u00A0", " ")
-
-    # normalize UNK variants early
     t = _normalize_unk(t)
 
-    # Speaker labels
     t = SPEAKER_EN_PATTERN.sub("", t)
     t = SPEAKER_NUM_PATTERN.sub("", t)
     t = SPEAKER_ZH_PATTERN.sub("", t)
 
-    # .cha-like markers
     t = TIME_CODE_PATTERN.sub("", t)
     t = MOR_PAR_PATTERN.sub("", t)
     t = POS_TAG_PATTERN.sub("", t)
 
-    # Normalize key markers first
     t = PAUSE_PATTERN.sub(" <...> ", t)
     t = GRAM_PATTERN.sub(" [+ gram] ", t)
 
     t = RETRACE_PATTERN.sub(" [//] ", t)
     t = REPEAT_PATTERN.sub(" [/] ", t)
 
-    # Filled pauses: keep only uh/um
     t = FILLPAUSE_PATTERN.sub(_keep_allowed_fillpause, t)
-
-    # TSV convention: keep CJK fillers with leading '&'
     t = AMP_CJK_PATTERN.sub(r"\1", t)
 
-    # Remove other [...] but keep the 3 markers
     def _drop_other_brackets(m: re.Match) -> str:
         s = m.group(0)
         s_norm = WS_PATTERN.sub(" ", s.strip())
         return s_norm if s_norm in KEEP_BRACKET_MARKERS else " "
 
     t = BRACKET_ANY_PATTERN.sub(_drop_other_brackets, t)
-
-    # Remove other <...> (except literal "<...>")
     t = DROP_ANGLE_EXCEPT_PAUSE_PATTERN.sub(" ", t)
 
-    # Remove (...), misc symbols
     t = PAREN_PATTERN.sub(" ", t)
     t = t.replace("‡", " ")
 
-    # Researcher codes
     t = DROP_PLUS_ANGLE_PATTERN.sub(" ", t)
     t = DROP_PLUS_CODE_PATTERN.sub(" ", t)
 
-    # Remove &codes except &-word (we already normalized/dropped &-* above)
     t = DROP_AMP_CODES_PATTERN.sub(" ", t)
 
-    # sanitize weird unicode
     t = sanitize_weird_unicode(t)
 
-    # Final whitespace + appropriate collapse
     t = WS_PATTERN.sub(" ", t).strip()
     t = _collapse_marker_dups(t)
     t = _normalize_unk(t)
     t = WS_PATTERN.sub(" ", t).strip()
     return t
+
+# =====================================================================
+# Prompt filter (ASR mixed speaker)
+# =====================================================================
+SENT_SPLIT_PATTERN = re.compile(r"(?<=[。！？!?；;\n])\s*")
+
+def prompt_filter_text(
+    text: TextLike,
+    *,
+    enabled: bool = True,
+    patterns: list[str] | None = None,
+    mode: str = "leading",              # leading | any
+    max_leading_sentences: int = 8,
+    min_keep_chars: int = 20,
+) -> str:
+    """
+    Remove interviewer prompts from ASR-mixed transcripts.
+
+    - mode="leading": drop consecutive prompt-like sentences at start only (safe default)
+    - mode="any": drop any sentence that matches (riskier)
+
+    If output becomes too short, returns "" (let quality_filter drop it).
+    """
+    t = _to_str(text)
+    if not enabled or not t:
+        return t.strip()
+
+    t = WS_PATTERN.sub(" ", t).strip()
+    if not t:
+        return ""
+
+    pats = patterns or []
+    regs: list[re.Pattern] = []
+    for p in pats:
+        try:
+            regs.append(re.compile(p))
+        except re.error:
+            continue
+
+    if not regs:
+        return t
+
+    parts = [s.strip() for s in SENT_SPLIT_PATTERN.split(t) if s.strip()]
+    if not parts:
+        return ""
+
+    def _is_prompt_sent(s: str) -> bool:
+        return any(rg.search(s) for rg in regs)
+
+    mode_l = (mode or "leading").strip().lower()
+    if mode_l == "any":
+        kept = [s for s in parts if not _is_prompt_sent(s)]
+    else:
+        kept: list[str] = []
+        dropped = 0
+        lim = max(0, int(max_leading_sentences))
+        for s in parts:
+            if dropped < lim and _is_prompt_sent(s):
+                dropped += 1
+                continue
+            kept.append(s)
+
+    out = " ".join(kept).strip()
+    out = WS_PATTERN.sub(" ", out).strip()
+
+    if len(out) < int(min_keep_chars):
+        return ""
+    return out
 
 # =====================================================================
 # No punctuation variant
