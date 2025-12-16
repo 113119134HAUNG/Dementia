@@ -1,30 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-asr_ncmmsc.py (paper-strict, single-point cleaning, converged)
+asr_ncmmsc.py (paper-strict, argparse-managed)
 
 - YAML is the single source of truth (load once).
 - Deterministic file discovery order.
-- sample_id avoids duplicated label prefix.
-- ASR writes RAW transcript only (NO cleaning).
-  All cleaning happens later in preprocess_chinese.py (single point).
-- paper-strict: if no audio files found, fail-fast.
-"""
+- Writes RAW transcript only (NO cleaning).
+  All cleaning happens later in preprocess/preprocess_chinese.py (single point).
+- Output CSV columns are FIXED:
+    id,label,transcript,audio_path,duration
 
+Fail-fast:
+- if no audio files found, raise FileNotFoundError
+"""
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from faster_whisper import WhisperModel
 
-from tools.asr_io import open_asr_csv_writer, write_asr_row
 from tools.config_utils import load_text_config, get_asr_config
 
 try:
     from tqdm.auto import tqdm
     HAS_TQDM = True
-except ImportError:
+except Exception:
     HAS_TQDM = False
 
 LABEL_DIRS: Dict[str, str] = {"AD": "AD", "HC": "HC", "MCI": "MCI"}
@@ -73,10 +75,10 @@ def iter_audio_files(
             counts[label] += 1
             yield label, sample_id, str(path)
 
-def build_decode_kwargs(asr_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _build_decode_kwargs(asr_cfg: Dict[str, Any]) -> Dict[str, Any]:
     decode_cfg = asr_cfg.get("decode")
     if decode_cfg is None or not isinstance(decode_cfg, dict):
-        raise KeyError("Config 缺少 asr.decode（dict）區塊。")
+        raise KeyError("Missing asr.decode (dict) in YAML.")
     return dict(decode_cfg)
 
 def run_ncmmsc_asr(
@@ -85,36 +87,43 @@ def run_ncmmsc_asr(
     labels: Optional[List[str]] = None,
     cap_per_label: Optional[int] = None,
 ) -> None:
-    cfg = load_text_config(config_path)  # load once
+    cfg = load_text_config(config_path)
     asr_cfg = get_asr_config(cfg=cfg)
 
     data_root = Path(asr_cfg["data_root"])
     output_csv = Path(asr_cfg["output_csv"])
-    model_size = asr_cfg["model_size"]
-    device = asr_cfg["device"]
-    compute_type = asr_cfg["compute_type"]
-    initial_prompt = asr_cfg.get("initial_prompt", "") or ""
+    model_size = str(asr_cfg["model_size"])
+    device = str(asr_cfg["device"])
+    compute_type = str(asr_cfg["compute_type"])
+    initial_prompt = str(asr_cfg.get("initial_prompt", "") or "")
 
     if not data_root.exists():
         raise FileNotFoundError(f"ASR data_root not found: {data_root}")
-
-    print(f"[INFO] Loading Whisper model: {model_size} on {device} ({compute_type})")
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
     files = list(iter_audio_files(data_root, labels=labels, cap_per_label=cap_per_label))
     print(f"[INFO] Found {len(files)} audio files under {data_root}")
     if len(files) == 0:
         raise FileNotFoundError(f"No audio files found under: {data_root}")
 
-    decode_kwargs = build_decode_kwargs(asr_cfg)
+    print(f"[INFO] Loading Whisper model: {model_size} on {device} ({compute_type})")
+    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+
+    decode_kwargs = _build_decode_kwargs(asr_cfg)
     if initial_prompt:
         decode_kwargs["initial_prompt"] = initial_prompt
+
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     ok_count = 0
     err_count = 0
 
-    fp, writer = open_asr_csv_writer(output_csv)
-    try:
+    with output_csv.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=["id", "label", "transcript", "audio_path", "duration"],
+        )
+        w.writeheader()
+
         iterable = tqdm(files, desc="Transcribing", unit="file", leave=True) if HAS_TQDM else files
 
         for label, sample_id, audio_path in iterable:
@@ -129,33 +138,31 @@ def run_ncmmsc_asr(
                 duration = float(getattr(info, "duration", 0.0) or 0.0)
                 ok_count += 1
             except Exception as e:  # noqa: BLE001
-                print(f"[ERROR] 無法轉錄 {audio_path}: {e}")
+                print(f"[ERROR] Failed to transcribe {audio_path}: {e}")
                 raw_text = ""
                 duration = 0.0
                 err_count += 1
 
-            # raw-only (single-point cleaning happens later)
-            write_asr_row(
-                writer,
-                sample_id=sample_id,
-                label=label,
-                raw_transcript=raw_text,
-                audio_path=audio_path,
-                duration=duration,
+            w.writerow(
+                {
+                    "id": sample_id,
+                    "label": _normalize_label(label),
+                    "transcript": raw_text,
+                    "audio_path": audio_path,
+                    "duration": duration,
+                }
             )
-    finally:
-        fp.close()
 
     print(f"\n[INFO] Done. Saved {len(files)} rows to {output_csv} (ok={ok_count}, error={err_count})")
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Run Whisper ASR on NCMMSC audio and export raw CSV (paper-strict; single-point cleaning)."
+    p = argparse.ArgumentParser(
+        description="Run Whisper ASR on NCMMSC audio and export raw CSV (paper-strict; single-point cleaning later)."
     )
-    parser.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
-    parser.add_argument("--labels", nargs="+", default=None, help="Optional subset labels. Example: --labels AD HC")
-    parser.add_argument("--cap-per-label", type=int, default=None, help="Optional cap per label. Example: --cap-per-label 200")
-    return parser
+    p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
+    p.add_argument("--labels", nargs="+", default=None, help="Optional subset labels. Example: --labels AD HC")
+    p.add_argument("--cap-per-label", type=int, default=None, help="Optional cap per label. Example: --cap-per-label 200")
+    return p
 
 def cli_main() -> None:
     args = build_arg_parser().parse_args()
