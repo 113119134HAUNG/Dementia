@@ -15,6 +15,9 @@ Pipeline:
 10) Final subset (apply_subset again to balance/cap on cleaned data)
 11) Length filter (YAML-driven; auto-skip on small class size)
 12) Save cleaned.jsonl (single set; no split)
+
+NEW in this revision:
+- Prompt filter stats logging (emptied/changed/avg len delta) for easier debugging.
 """
 
 from __future__ import annotations
@@ -28,13 +31,9 @@ import pandas as pd
 
 from preprocess.collection import JSONLCombiner
 from settings.dataset_subset import apply_subset
-from tools.text_cleaning import (
-    clean_asr_chinese,
-    clean_structured_chinese,
-    prompt_filter_text,
-)
-from tools.config_utils import load_text_config, get_asr_config, get_text_config
 from settings.enums import ADType
+from tools.config_utils import get_asr_config, get_text_config, load_text_config
+from tools.text_cleaning import clean_asr_chinese, clean_structured_chinese, prompt_filter_text
 
 UNK_TOKEN = "【聽不清楚】"
 
@@ -315,6 +314,18 @@ def length_filter(
         print("[INFO] Label distribution after filtering:\n", filtered["Diagnosis"].value_counts())
     return filtered
 
+def _log_prompt_filter_stats(before_s: pd.Series, after_s: pd.Series, *, scope_name: str) -> None:
+    try:
+        before_len = before_s.fillna("").astype(str).str.len()
+        after_len = after_s.fillna("").astype(str).str.len()
+        emptied = int((after_len == 0).sum())
+        changed = int((before_s.fillna("").astype(str) != after_s.fillna("").astype(str)).sum())
+        n = int(len(before_s))
+        avg_delta = float((before_len - after_len).mean()) if n > 0 else 0.0
+        print(f"[INFO] Prompt filter ({scope_name}): emptied={emptied}/{n}, changed={changed}/{n}, avg_len_delta={avg_delta:.2f}")
+    except Exception:
+        print(f"[WARN] Prompt filter stats failed for scope={scope_name} (non-fatal).")
+
 def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -> pd.DataFrame:
     df = pd.read_json(Path(merged_jsonl_path), lines=True)
 
@@ -362,6 +373,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
             apply_set = {str(x) for x in pf_apply_datasets}
             mask = df["Dataset"].astype(str).isin(apply_set)
             if mask.any():
+                before = df.loc[mask, "Text_interviewer_participant"].copy()
                 df.loc[mask, "Text_interviewer_participant"] = df.loc[mask, "Text_interviewer_participant"].apply(
                     lambda x: prompt_filter_text(
                         x,
@@ -372,7 +384,10 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
                         min_keep_chars=pf_min_keep,
                     )
                 )
+                after = df.loc[mask, "Text_interviewer_participant"]
+                _log_prompt_filter_stats(before, after, scope_name="dataset_masked")
         else:
+            before = df["Text_interviewer_participant"].copy()
             df["Text_interviewer_participant"] = df["Text_interviewer_participant"].apply(
                 lambda x: prompt_filter_text(
                     x,
@@ -383,6 +398,8 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
                     min_keep_chars=pf_min_keep,
                 )
             )
+            after = df["Text_interviewer_participant"]
+            _log_prompt_filter_stats(before, after, scope_name="all_rows")
 
     # (C) quality filter
     qf_cfg = text_cfg.get("quality_filter", {})
