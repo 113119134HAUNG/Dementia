@@ -16,7 +16,11 @@ common:
   max_seq_length: &max_seq_length 512
 
 asr:
+  # choose ONE:
   data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
+  # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge_vad"
+  # (raw/raw_vad 也可：/content/NCMMSC2021_AD_Competition-dev/dataset/raw 或 raw_vad)
+
   output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
   model_size: "large-v2"
   device: "cuda"
@@ -127,7 +131,9 @@ features:
 
   bert:
     model_name: "/content/models/bert-base-chinese"
+    embedding_strategy: "mean"
     pooling: "mean"
+    last_n_layers: 4
     max_seq_length: *max_seq_length
     device: "cuda"
     logreg:
