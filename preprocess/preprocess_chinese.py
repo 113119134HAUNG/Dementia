@@ -16,7 +16,7 @@ Pipeline:
 11) Length filter (YAML-driven; auto-skip on small class size)
 12) Save cleaned.jsonl (single set; no split)
 
-NEW in this revision:
+NEW:
 - Prompt filter stats logging (emptied/changed/avg len delta) for easier debugging.
 """
 
