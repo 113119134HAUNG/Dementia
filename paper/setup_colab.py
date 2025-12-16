@@ -32,10 +32,8 @@ def run(cmd: List[str], *, quiet: bool = False) -> None:
         print("\n$ " + " ".join(cmd))
     subprocess.run(cmd, check=True)
 
-
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
-
 
 def in_colab() -> bool:
     return "COLAB_GPU" in os.environ or "COLAB_RELEASE_TAG" in os.environ
@@ -55,7 +53,6 @@ def install_deps(
     - default: DO NOT touch numpy/pandas/torch (avoid conflicts with colab/opencv/tf/torchvision)
     - optional flags to include them if you really need.
     """
-    # packages that are usually safe to install on Colab without breaking preinstalls
     pkgs = [
         "scikit-learn",
         "jieba",
@@ -66,10 +63,9 @@ def install_deps(
         "hf_transfer",
         "faster-whisper",
         "gdown",
+        "pyyaml",
     ]
 
-    # Only install/upgrade these when explicitly asked.
-    # On Colab, upgrading them often causes conflicts with preinstalled opencv/tf/torchvision/torchaudio.
     if install_core:
         pkgs = ["numpy", "pandas"] + pkgs
     if install_torch:
@@ -216,19 +212,17 @@ def hf_login_and_download(
     token = token_arg or token_secret or token_env
     who = try_whoami(token) if token else None
 
-    # 如果選到的 token 無效，而且 Secrets 有值，就用 Secrets 再試一次（避免被舊 env HF_TOKEN 干擾）
     if not who and token_secret:
         token = token_secret
         who = try_whoami(token)
 
-    # still invalid -> prompt only if interactive
     if not who and interactive:
         from getpass import getpass
         token = getpass("Paste your Hugging Face token (hidden): ").strip()
         who = try_whoami(token) if token else None
 
     if token and who:
-        os.environ["HF_TOKEN"] = token  # 強制本進程用這個（覆蓋可能的錯 env）
+        os.environ["HF_TOKEN"] = token
         login(token=token)
         print("[OK] HF login:", who)
     else:
@@ -280,7 +274,6 @@ def hf_login_and_download(
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Colab one-shot setup (paper-style, argparse-managed).")
 
-    # toggles
     p.add_argument("--install", action="store_true", help="Install dependencies via pip (Colab-safe defaults).")
     p.add_argument("--download-data", action="store_true", help="Download dataset zip from Google Drive.")
     p.add_argument("--unzip-data", action="store_true", help="Unzip dataset zip.")
@@ -289,20 +282,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--hf", action="store_true", help="Hugging Face login + pre-download models.")
     p.add_argument("--all", action="store_true", help="Run all steps above.")
 
-    # install behavior
     p.add_argument("--upgrade", action="store_true", help="pip install -U (NOT recommended on Colab unless needed).")
-    p.add_argument(
-        "--install-core",
-        action="store_true",
-        help="Also install/upgrade numpy+pandas (may cause Colab conflicts).",
-    )
-    p.add_argument(
-        "--install-torch",
-        action="store_true",
-        help="Also install/upgrade torch (may break torchvision/torchaudio on Colab).",
-    )
+    p.add_argument("--install-core", action="store_true", help="Also install/upgrade numpy+pandas (may conflict).")
+    p.add_argument("--install-torch", action="store_true", help="Also install/upgrade torch (may break torchvision).")
 
-    # params
     p.add_argument("--gdrive-file-id", type=str, default="1NPE7aLlSqlKdOJE4l5HTN06DxKP73a-O")
     p.add_argument("--zip-path", type=str, default="/content/NCMMSC2021_AD_Competition-dev.zip")
     p.add_argument("--unzip-dir", type=str, default="/content")
