@@ -22,9 +22,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from preprocess.collection import JSONLCombiner
-from preprocess.dataset_subset import apply_subset
-from preprocess.text_cleaning import clean_asr_chinese, clean_structured_chinese
-
+from settings.dataset_subset import apply_subset
+from toolstext_cleaning import clean_asr_chinese, clean_structured_chinese
 from tools.config_utils import load_text_config, get_asr_config, get_text_config
 from settings.enums import ADType
 
