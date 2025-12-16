@@ -45,7 +45,7 @@ BRACKET_ANY_PATTERN = re.compile(r"\[[^\]]*\]")
 # =====================================================================
 # Unintelligible token normalization
 # =====================================================================
-UNK_TOKEN = "【聽不清楚】"
+UNK_TOKEN = "【聽不清楚】","【上海话】"
 UNK_ANY_PATTERN = re.compile(r"[\[\【]\s*聽不清楚\s*[\]\】]")
 UNK_DUP_PATTERN = re.compile(rf"(?:{re.escape(UNK_TOKEN)}\s*){{2,}}")
 
