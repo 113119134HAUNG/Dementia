@@ -23,7 +23,7 @@ asr:
   # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge_vad"
 
   output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
-  model_size: "large-v2"
+  model_size: "large-v3"
   device: "cuda"
   compute_type: "float16"
 
