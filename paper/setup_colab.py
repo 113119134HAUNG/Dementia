@@ -209,7 +209,6 @@ def hf_login_and_download(
         except Exception:
             return ""
 
-    # ✅ Priority: arg > Colab Secrets(FACE) > env
     token_arg = (hf_token or "").strip()
     token_secret = get_colab_secret_token("FACE")
     token_env = (os.environ.get("HF_TOKEN", "") or "").strip()
@@ -304,7 +303,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
 
     # params
-    p.add_argument("--gdrive-file-id", type=str, default="13fAo7D8p7rm1GKKEFAnmGL_qVFnFS6fP")
+    p.add_argument("--gdrive-file-id", type=str, default="1NPE7aLlSqlKdOJE4l5HTN06DxKP73a-O")
     p.add_argument("--zip-path", type=str, default="/content/NCMMSC2021_AD_Competition-dev.zip")
     p.add_argument("--unzip-dir", type=str, default="/content")
 
