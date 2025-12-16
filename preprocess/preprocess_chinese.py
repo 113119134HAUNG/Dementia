@@ -13,11 +13,11 @@ Pipeline:
 3) Dedup (Dataset, ID)
 4) Normalize labels via ADType + YAML label_map
 5) Language filter (YAML-driven)
-6) Subset/balance/cap (ONLY in apply_subset)
-7) Clean text (single point; tools.text_cleaning)
-8) Quality filter (optional; removes low-information / garbage text; NOT label/dataset filtering)
-9) Subset again (apply_subset) to re-balance/cap AFTER quality filtering (paper-friendly)
-10) Length filter (YAML-driven; no helper col leakage)
+6) Pre-clean subset (restrict dataset/labels only; NO balance/cap yet)
+7) Clean text (tools.text_cleaning)
+8) Quality filter (drop low-information / garbage text; YAML-driven)
+9) Final subset (apply_subset again to balance/cap on cleaned data)
+10) Length filter (YAML-driven)
 11) Save cleaned.jsonl (single set; no split)
 """
 
@@ -36,8 +36,11 @@ from tools.text_cleaning import clean_asr_chinese, clean_structured_chinese
 from tools.config_utils import load_text_config, get_asr_config, get_text_config
 from settings.enums import ADType
 
-UNK_TOKEN = "【聽不清楚】"  # keep consistent with tools.text_cleaning
+UNK_TOKEN = "【聽不清楚】"
 
+# =====================================================================
+# helpers
+# =====================================================================
 def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
     if key not in cfg:
         prefix = f"{where}." if where else ""
@@ -75,9 +78,9 @@ def _stable_sort(df: pd.DataFrame) -> pd.DataFrame:
         return df.sort_values(by="ID", kind="mergesort")
     return df.sort_index(kind="mergesort")
 
-# ---------------------------------------------------------------------
+# =====================================================================
 # Step 1: ASR CSV -> NCMMSC JSONL
-# ---------------------------------------------------------------------
+# =====================================================================
 def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) -> str:
     csv_path_p = Path(csv_path)
     jsonl_path_p = Path(jsonl_path)
@@ -85,7 +88,6 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) ->
     if not csv_path_p.exists():
         raise FileNotFoundError(f"ASR CSV not found: {csv_path_p} (run Music_to_text.asr_ncmmsc first)")
 
-    # safer: handle BOM
     df = pd.read_csv(csv_path_p, encoding="utf-8-sig")
 
     for col in ("id", "label", "transcript"):
@@ -107,9 +109,9 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) ->
     print(f"[INFO] Saved NCMMSC JSONL to: {jsonl_path_p} (n={len(out_df)})")
     return str(jsonl_path_p)
 
-# ---------------------------------------------------------------------
+# =====================================================================
 # Step 2: Merge JSONLs (only existing, ONLY text.corpora)
-# ---------------------------------------------------------------------
+# =====================================================================
 def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_name: str) -> str:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -146,9 +148,9 @@ def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_nam
     print(f"[INFO] Combined JSONL saved to: {merged_path}")
     return str(merged_path)
 
-# ---------------------------------------------------------------------
-# Step 3-6: Load + dedup + normalize + filter + subset + clean + quality + length
-# ---------------------------------------------------------------------
+# =====================================================================
+# Step 3-10: Load + dedup + normalize + filter + subset + clean + quality + length
+# =====================================================================
 def dedup_records(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -209,6 +211,15 @@ def clean_text_column(df: pd.DataFrame) -> pd.DataFrame:
     out["Text_interviewer_participant"] = out["Text_interviewer_participant"].apply(clean_structured_chinese)
     return out
 
+def _subset_cfg_preclean(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Pre-clean subset: restrict dataset/labels only; disable balancing/capping.
+    """
+    cfg = deepcopy(text_cfg)
+    cfg["balance"] = False
+    cfg.pop("cap_per_class", None)
+    return cfg
+
 def quality_filter(
     df: pd.DataFrame,
     *,
@@ -219,8 +230,10 @@ def quality_filter(
     unk_token: str = UNK_TOKEN,
 ) -> pd.DataFrame:
     """
-    Remove low-information samples. This is NOT dataset/label/balance/cap filtering.
-    It only uses text quality.
+    Drop low-information samples:
+      - too short
+      - too few Chinese characters (Han)
+      - too high ratio of UNK token
     """
     if not enabled or df is None or df.empty:
         return df
@@ -228,18 +241,18 @@ def quality_filter(
     out = df.copy()
     s = out["Text_interviewer_participant"].fillna("").astype(str)
 
-    # basic length
+    # 1) minimum length
     keep = s.str.strip().str.len() >= int(min_chars)
 
-    # count han chars after removing UNK
+    # 2) count Han chars after removing UNK token
     s_wo_unk = s.str.replace(unk_token, "", regex=False)
     han_cnt = s_wo_unk.str.count(r"[\u4e00-\u9fff]")
     keep &= han_cnt >= int(min_han)
 
-    # UNK ratio by character mass (more meaningful than count)
+    # 3) UNK ratio by character mass (approx)
     total_len = s.str.len().clip(lower=1)
-    unk_cnt = s.str.count(repr(unk_token)[1:-1])  # safe literal-ish
-    unk_char_mass = unk_cnt * len(unk_token)
+    unk_count = s.str.count(unk_token)
+    unk_char_mass = unk_count * len(unk_token)
     unk_ratio = (unk_char_mass / total_len)
     keep &= unk_ratio <= float(max_unk_ratio)
 
@@ -284,16 +297,6 @@ def length_filter(df: pd.DataFrame, *, enabled: bool, std_k: float) -> pd.DataFr
         print("[INFO] Label distribution after filtering:\n", filtered["Diagnosis"].value_counts())
     return filtered
 
-def _subset_cfg_preclean(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Apply subset early ONLY to enforce dataset/labels scope (for efficiency),
-    but disable balancing/capping pre-clean.
-    """
-    cfg = deepcopy(text_cfg)
-    cfg["balance"] = False
-    cfg.pop("cap_per_class", None)  # avoid early cap
-    return cfg
-
 def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -> pd.DataFrame:
     df = pd.read_json(Path(merged_jsonl_path), lines=True)
 
@@ -305,7 +308,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     lang_cfg = _get_dict(text_cfg, "language_filter", where="text")
     df = drop_languages(df, drop_langs=lang_cfg.get("drop_languages", []) or [])
 
-    # 1) pre-clean subset: restrict scope (no balance/cap yet)
+    # (A) pre-clean subset: restrict scope only
     df = apply_subset(df, _subset_cfg_preclean(text_cfg))
     print(f"[INFO] After pre-clean subset: {len(df)} samples remaining.")
     if not df.empty:
@@ -314,24 +317,20 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     if not df.empty and (df["Diagnosis"].astype(str) == "Unknown").any():
         raise ValueError("Found Diagnosis=='Unknown' after pre-clean subset. Fix label_map/ADType or target_labels.")
 
-    # 2) single point cleaning
+    # (B) single point cleaning
     df = clean_text_column(df)
     if df.empty:
         return df.reset_index(drop=True)
 
-    # 3) quality filter (optional, default enabled)
-    qf_cfg = text_cfg.get("quality_filter")
-    if isinstance(qf_cfg, dict):
-        qf_enabled = bool(qf_cfg.get("enabled", True))
-        min_chars = int(qf_cfg.get("min_chars", 30))
-        min_han = int(qf_cfg.get("min_han", 20))
-        max_unk_ratio = float(qf_cfg.get("max_unk_ratio", 0.30))
-    else:
-        # defaults: ON (best for your current issue)
-        qf_enabled = True
-        min_chars = 30
-        min_han = 20
-        max_unk_ratio = 0.30
+    # (C) quality filter (YAML-driven; defaults if missing)
+    qf_cfg = text_cfg.get("quality_filter", {})
+    if not isinstance(qf_cfg, dict):
+        qf_cfg = {}
+
+    qf_enabled = bool(qf_cfg.get("enabled", True))
+    min_chars = int(qf_cfg.get("min_chars", 30))
+    min_han = int(qf_cfg.get("min_han", 20))
+    max_unk_ratio = float(qf_cfg.get("max_unk_ratio", 0.30))
 
     df = quality_filter(
         df,
@@ -342,7 +341,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
         unk_token=UNK_TOKEN,
     )
 
-    # 4) final subset: balance/cap AFTER quality filtering
+    # (D) final subset: re-balance/cap AFTER cleaning+quality
     df = apply_subset(df, text_cfg)
     print(f"[INFO] After final subset: {len(df)} samples remaining.")
     if not df.empty:
@@ -351,7 +350,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     if not df.empty and (df["Diagnosis"].astype(str) == "Unknown").any():
         raise ValueError("Found Diagnosis=='Unknown' after final apply_subset. Fix label_map/ADType or target_labels.")
 
-    # 5) length filter
+    # (E) length filter
     lf_cfg = _get_dict(text_cfg, "length_filter", where="text")
     enabled = bool(lf_cfg.get("enabled", True))
     std_k = float(_require(lf_cfg, "std_k", where="text.length_filter"))
@@ -360,9 +359,9 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     df = _stable_sort(df).reset_index(drop=True)
     return df
 
-# ---------------------------------------------------------------------
-# Step 7: Save cleaned.jsonl (NO split)
-# ---------------------------------------------------------------------
+# =====================================================================
+# Step 11: Save cleaned.jsonl (NO split)
+# =====================================================================
 def save_cleaned_jsonl(df: pd.DataFrame, *, output_path: str) -> str:
     out_p = Path(output_path)
     out_p.parent.mkdir(parents=True, exist_ok=True)
@@ -375,9 +374,9 @@ def save_cleaned_jsonl(df: pd.DataFrame, *, output_path: str) -> str:
     print(f"[INFO] Saved cleaned JSONL to: {out_p} (n={len(df)})")
     return str(out_p)
 
-# ---------------------------------------------------------------------
+# =====================================================================
 # Orchestrator
-# ---------------------------------------------------------------------
+# =====================================================================
 def run_chinese_preprocessing(
     config_path: Optional[str] = None,
     *,
@@ -420,17 +419,17 @@ def run_chinese_preprocessing(
     # Step 2: merge JSONLs
     merged_path = combine_jsonls(corpora=corpora, output_dir=output_dir, merged_name=merged_name)
 
-    # Step 3-6: process
+    # Step 3-10: process
     df_clean = load_and_process_chinese(merged_path, text_cfg)
 
-    # Step 7: save cleaned.jsonl
+    # Step 11: save cleaned.jsonl
     cleaned_path = save_cleaned_jsonl(df_clean, output_path=cleaned_jsonl)
 
     return str(merged_path), str(cleaned_path)
 
-# ---------------------------------------------------------------------
+# =====================================================================
 # CLI
-# ---------------------------------------------------------------------
+# =====================================================================
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Preprocess Chinese AD datasets (merge/clean) - paper-strict (no split).")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
