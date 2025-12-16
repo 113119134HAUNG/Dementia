@@ -15,13 +15,16 @@ Pipeline:
 5) Language filter (YAML-driven)
 6) Subset/balance/cap (ONLY in apply_subset)
 7) Clean text (single point; tools.text_cleaning)
-8) Length filter (YAML-driven; no helper col leakage)
-9) Save cleaned.jsonl (single set; no split)
+8) Quality filter (optional; removes low-information / garbage text; NOT label/dataset filtering)
+9) Subset again (apply_subset) to re-balance/cap AFTER quality filtering (paper-friendly)
+10) Length filter (YAML-driven; no helper col leakage)
+11) Save cleaned.jsonl (single set; no split)
 """
 
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,6 +35,8 @@ from settings.dataset_subset import apply_subset
 from tools.text_cleaning import clean_asr_chinese, clean_structured_chinese
 from tools.config_utils import load_text_config, get_asr_config, get_text_config
 from settings.enums import ADType
+
+UNK_TOKEN = "【聽不清楚】"  # keep consistent with tools.text_cleaning
 
 def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
     if key not in cfg:
@@ -80,7 +85,8 @@ def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) ->
     if not csv_path_p.exists():
         raise FileNotFoundError(f"ASR CSV not found: {csv_path_p} (run Music_to_text.asr_ncmmsc first)")
 
-    df = pd.read_csv(csv_path_p, encoding="utf-8")
+    # safer: handle BOM
+    df = pd.read_csv(csv_path_p, encoding="utf-8-sig")
 
     for col in ("id", "label", "transcript"):
         if col not in df.columns:
@@ -134,13 +140,14 @@ def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_nam
         print(f"  - {f}")
 
     combiner = JSONLCombiner(input_files, str(out_dir), merged_name)
-    out_path = combiner.combine()
+    combiner.combine()
 
-    print(f"[INFO] Combined JSONL saved to: {out_path}")
-    return str(out_path)
+    merged_path = out_dir / merged_name
+    print(f"[INFO] Combined JSONL saved to: {merged_path}")
+    return str(merged_path)
 
 # ---------------------------------------------------------------------
-# Step 3-6: Load + dedup + normalize + filter + subset + clean + length
+# Step 3-6: Load + dedup + normalize + filter + subset + clean + quality + length
 # ---------------------------------------------------------------------
 def dedup_records(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -202,6 +209,46 @@ def clean_text_column(df: pd.DataFrame) -> pd.DataFrame:
     out["Text_interviewer_participant"] = out["Text_interviewer_participant"].apply(clean_structured_chinese)
     return out
 
+def quality_filter(
+    df: pd.DataFrame,
+    *,
+    enabled: bool,
+    min_chars: int,
+    min_han: int,
+    max_unk_ratio: float,
+    unk_token: str = UNK_TOKEN,
+) -> pd.DataFrame:
+    """
+    Remove low-information samples. This is NOT dataset/label/balance/cap filtering.
+    It only uses text quality.
+    """
+    if not enabled or df is None or df.empty:
+        return df
+
+    out = df.copy()
+    s = out["Text_interviewer_participant"].fillna("").astype(str)
+
+    # basic length
+    keep = s.str.strip().str.len() >= int(min_chars)
+
+    # count han chars after removing UNK
+    s_wo_unk = s.str.replace(unk_token, "", regex=False)
+    han_cnt = s_wo_unk.str.count(r"[\u4e00-\u9fff]")
+    keep &= han_cnt >= int(min_han)
+
+    # UNK ratio by character mass (more meaningful than count)
+    total_len = s.str.len().clip(lower=1)
+    unk_cnt = s.str.count(repr(unk_token)[1:-1])  # safe literal-ish
+    unk_char_mass = unk_cnt * len(unk_token)
+    unk_ratio = (unk_char_mass / total_len)
+    keep &= unk_ratio <= float(max_unk_ratio)
+
+    filtered = out.loc[keep].reset_index(drop=True)
+    print(f"[INFO] Quality filter: {len(out)} -> {len(filtered)} (dropped {len(out)-len(filtered)})")
+    if not filtered.empty:
+        print("[INFO] Label distribution after quality filter:\n", filtered["Diagnosis"].value_counts())
+    return filtered
+
 def length_filter(df: pd.DataFrame, *, enabled: bool, std_k: float) -> pd.DataFrame:
     if not enabled or df is None or df.empty:
         return df
@@ -237,6 +284,16 @@ def length_filter(df: pd.DataFrame, *, enabled: bool, std_k: float) -> pd.DataFr
         print("[INFO] Label distribution after filtering:\n", filtered["Diagnosis"].value_counts())
     return filtered
 
+def _subset_cfg_preclean(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Apply subset early ONLY to enforce dataset/labels scope (for efficiency),
+    but disable balancing/capping pre-clean.
+    """
+    cfg = deepcopy(text_cfg)
+    cfg["balance"] = False
+    cfg.pop("cap_per_class", None)  # avoid early cap
+    return cfg
+
 def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -> pd.DataFrame:
     df = pd.read_json(Path(merged_jsonl_path), lines=True)
 
@@ -248,19 +305,53 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     lang_cfg = _get_dict(text_cfg, "language_filter", where="text")
     df = drop_languages(df, drop_langs=lang_cfg.get("drop_languages", []) or [])
 
-    df = apply_subset(df, text_cfg)
-    print(f"[INFO] After subset: {len(df)} samples remaining.")
+    # 1) pre-clean subset: restrict scope (no balance/cap yet)
+    df = apply_subset(df, _subset_cfg_preclean(text_cfg))
+    print(f"[INFO] After pre-clean subset: {len(df)} samples remaining.")
     if not df.empty:
-        print("[INFO] Label distribution after subset:\n", df["Diagnosis"].value_counts())
+        print("[INFO] Label distribution after pre-clean subset:\n", df["Diagnosis"].value_counts())
 
     if not df.empty and (df["Diagnosis"].astype(str) == "Unknown").any():
-        raise ValueError("Found Diagnosis=='Unknown' after apply_subset. Fix label_map/ADType or target_labels.")
+        raise ValueError("Found Diagnosis=='Unknown' after pre-clean subset. Fix label_map/ADType or target_labels.")
 
+    # 2) single point cleaning
     df = clean_text_column(df)
-
     if df.empty:
         return df.reset_index(drop=True)
 
+    # 3) quality filter (optional, default enabled)
+    qf_cfg = text_cfg.get("quality_filter")
+    if isinstance(qf_cfg, dict):
+        qf_enabled = bool(qf_cfg.get("enabled", True))
+        min_chars = int(qf_cfg.get("min_chars", 30))
+        min_han = int(qf_cfg.get("min_han", 20))
+        max_unk_ratio = float(qf_cfg.get("max_unk_ratio", 0.30))
+    else:
+        # defaults: ON (best for your current issue)
+        qf_enabled = True
+        min_chars = 30
+        min_han = 20
+        max_unk_ratio = 0.30
+
+    df = quality_filter(
+        df,
+        enabled=qf_enabled,
+        min_chars=min_chars,
+        min_han=min_han,
+        max_unk_ratio=max_unk_ratio,
+        unk_token=UNK_TOKEN,
+    )
+
+    # 4) final subset: balance/cap AFTER quality filtering
+    df = apply_subset(df, text_cfg)
+    print(f"[INFO] After final subset: {len(df)} samples remaining.")
+    if not df.empty:
+        print("[INFO] Label distribution after final subset:\n", df["Diagnosis"].value_counts())
+
+    if not df.empty and (df["Diagnosis"].astype(str) == "Unknown").any():
+        raise ValueError("Found Diagnosis=='Unknown' after final apply_subset. Fix label_map/ADType or target_labels.")
+
+    # 5) length filter
     lf_cfg = _get_dict(text_cfg, "length_filter", where="text")
     enabled = bool(lf_cfg.get("enabled", True))
     std_k = float(_require(lf_cfg, "std_k", where="text.length_filter"))
