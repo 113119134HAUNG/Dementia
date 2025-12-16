@@ -10,10 +10,11 @@ Pipeline:
 5) Language filter (YAML-driven)
 6) Pre-clean subset (restrict dataset/labels only; NO balance/cap yet)
 7) Clean text (tools.text_cleaning)
-8) Quality filter (drop low-information / garbage text; YAML-driven, with drop-reason stats)
-9) Final subset (apply_subset again to balance/cap on cleaned data)
-10) Length filter (YAML-driven; auto-skip on small class size)
-11) Save cleaned.jsonl (single set; no split)
+8) Prompt filter (ASR mixed speaker; YAML-driven; optional; before quality filter)
+9) Quality filter (drop low-information / garbage text; YAML-driven, with drop-reason stats)
+10) Final subset (apply_subset again to balance/cap on cleaned data)
+11) Length filter (YAML-driven; auto-skip on small class size)
+12) Save cleaned.jsonl (single set; no split)
 """
 
 from __future__ import annotations
@@ -27,7 +28,11 @@ import pandas as pd
 
 from preprocess.collection import JSONLCombiner
 from settings.dataset_subset import apply_subset
-from tools.text_cleaning import clean_asr_chinese, clean_structured_chinese
+from tools.text_cleaning import (
+    clean_asr_chinese,
+    clean_structured_chinese,
+    prompt_filter_text,
+)
 from tools.config_utils import load_text_config, get_asr_config, get_text_config
 from settings.enums import ADType
 
@@ -144,7 +149,7 @@ def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_nam
     return str(merged_path)
 
 # =====================================================================
-# Step 3-10: Load + dedup + normalize + filter + subset + clean + quality + length
+# Step 3-11: Load + dedup + normalize + filter + subset + clean + prompt + quality + length
 # =====================================================================
 def dedup_records(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -207,9 +212,6 @@ def clean_text_column(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def _subset_cfg_preclean(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Pre-clean subset: restrict dataset/labels only; disable balancing/capping.
-    """
     cfg = deepcopy(text_cfg)
     cfg["balance"] = False
     cfg.pop("cap_per_class", None)
@@ -225,28 +227,14 @@ def quality_filter(
     max_unk_ratio: float,
     unk_token: str = UNK_TOKEN,
 ) -> pd.DataFrame:
-    """
-    Drop low-information samples (after cleaning):
-
-    Keep if all pass:
-      - total chars >= min_chars
-      - lexical chars (remove UNK + markers + whitespace) >= min_lex_chars
-      - Han chars (after removing UNK + markers) >= min_han
-      - UNK char-mass ratio <= max_unk_ratio
-
-    Also prints drop-reason stats for tuning.
-    """
     if not enabled or df is None or df.empty:
         return df
 
     out = df.copy()
     s = out["Text_interviewer_participant"].fillna("").astype(str).str.strip()
 
-    # total length
     total_len = s.str.len()
 
-    # "lexical" view: remove UNK + known markers (paper markers) then remove whitespace
-    # (we don't rely on tokenization because Chinese is often no-space)
     marker_pat = r"(\[//\]|\[/\]|\[\+\s*gram\]|\<\.\.\.\>|&-(?:uh|um))"
     lex = s.str.replace(unk_token, "", regex=False)
     lex = lex.str.replace(marker_pat, "", regex=True)
@@ -255,7 +243,6 @@ def quality_filter(
     lex_len = lex_nos.str.len()
     han_cnt = lex.str.count(r"[\u4e00-\u9fff]")
 
-    # UNK ratio by char-mass approximation
     total_len_safe = total_len.clip(lower=1)
     unk_count = s.str.count(unk_token)
     unk_char_mass = unk_count * len(unk_token)
@@ -268,7 +255,6 @@ def quality_filter(
 
     keep = cond_chars & cond_lex & cond_han & cond_unk
 
-    # ---- drop reason stats (non-exclusive) ----
     n0 = len(out)
     dropped = int((~keep).sum())
     print(f"[INFO] Quality filter: {n0} -> {n0 - dropped} (dropped {dropped})")
@@ -292,12 +278,6 @@ def length_filter(
     std_k: float,
     min_class_n: int = 30,
 ) -> pd.DataFrame:
-    """
-    Length filter by class mean ± k*std.
-
-    Safety:
-      - if any class has < min_class_n samples, skip (prevents tiny-N instability).
-    """
     if not enabled or df is None or df.empty:
         return df
     if std_k < 0:
@@ -355,12 +335,56 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     if not df.empty and (df["Diagnosis"].astype(str) == "Unknown").any():
         raise ValueError("Found Diagnosis=='Unknown' after pre-clean subset. Fix label_map/ADType or target_labels.")
 
-    # (B) single point cleaning
+    # (B) cleaning
     df = clean_text_column(df)
     if df.empty:
         return df.reset_index(drop=True)
 
-    # (C) quality filter (YAML-driven; safe defaults)
+    # (B2) prompt filter (YAML-driven; defaults safe)
+    pf_cfg = text_cfg.get("prompt_filter", {})
+    if not isinstance(pf_cfg, dict):
+        pf_cfg = {}
+
+    pf_enabled = bool(pf_cfg.get("enabled", False))
+    pf_apply_datasets = pf_cfg.get("apply_datasets", None)
+    if pf_apply_datasets is not None and not isinstance(pf_apply_datasets, list):
+        pf_apply_datasets = None
+
+    pf_mode = str(pf_cfg.get("mode", "leading"))
+    pf_max_leading = int(pf_cfg.get("max_leading_sentences", 8))
+    pf_min_keep = int(pf_cfg.get("min_keep_chars", 20))
+    pf_patterns = pf_cfg.get("patterns", []) or []
+    if not isinstance(pf_patterns, list):
+        pf_patterns = []
+
+    if pf_enabled and "Text_interviewer_participant" in df.columns:
+        if pf_apply_datasets and "Dataset" in df.columns:
+            apply_set = {str(x) for x in pf_apply_datasets}
+            mask = df["Dataset"].astype(str).isin(apply_set)
+            if mask.any():
+                df.loc[mask, "Text_interviewer_participant"] = df.loc[mask, "Text_interviewer_participant"].apply(
+                    lambda x: prompt_filter_text(
+                        x,
+                        enabled=True,
+                        patterns=pf_patterns,
+                        mode=pf_mode,
+                        max_leading_sentences=pf_max_leading,
+                        min_keep_chars=pf_min_keep,
+                    )
+                )
+        else:
+            df["Text_interviewer_participant"] = df["Text_interviewer_participant"].apply(
+                lambda x: prompt_filter_text(
+                    x,
+                    enabled=True,
+                    patterns=pf_patterns,
+                    mode=pf_mode,
+                    max_leading_sentences=pf_max_leading,
+                    min_keep_chars=pf_min_keep,
+                )
+            )
+
+    # (C) quality filter
     qf_cfg = text_cfg.get("quality_filter", {})
     if not isinstance(qf_cfg, dict):
         qf_cfg = {}
@@ -381,7 +405,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
         unk_token=UNK_TOKEN,
     )
 
-    # (D) final subset: re-balance/cap AFTER cleaning+quality
+    # (D) final subset after cleaning+filters
     df = apply_subset(df, text_cfg)
     print(f"[INFO] After final subset: {len(df)} samples remaining.")
     if not df.empty:
@@ -402,7 +426,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     return df
 
 # =====================================================================
-# Step 11: Save cleaned.jsonl (NO split)
+# Save cleaned.jsonl (NO split)
 # =====================================================================
 def save_cleaned_jsonl(df: pd.DataFrame, *, output_path: str) -> str:
     out_p = Path(output_path)
@@ -461,10 +485,10 @@ def run_chinese_preprocessing(
     # Step 2: merge JSONLs
     merged_path = combine_jsonls(corpora=corpora, output_dir=output_dir, merged_name=merged_name)
 
-    # Step 3-10: process
+    # Step 3-11: process
     df_clean = load_and_process_chinese(merged_path, text_cfg)
 
-    # Step 11: save cleaned.jsonl
+    # Step 12: save cleaned.jsonl
     cleaned_path = save_cleaned_jsonl(df_clean, output_path=cleaned_jsonl)
 
     return str(merged_path), str(cleaned_path)
