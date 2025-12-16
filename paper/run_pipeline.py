@@ -3,9 +3,10 @@
 paper/run_pipeline.py  (paper-style, clean, argparse-managed)
 
 One-command pipeline runner:
-1) preprocess.preprocess_predictive
-2) preprocess.* (text pipeline) -> writes text.cleaned_jsonl
-3) paper.evaluate_cv
+0) Music_to_text.asr_ncmmsc           (ASR -> CSV)
+1) preprocess.preprocess_predictive   (TSV -> JSONL)
+2) preprocess.* (text pipeline)       (merge/clean -> writes text.cleaned_jsonl)
+3) paper.evaluate_cv                  (CV)
 
 - No notebook magics
 - No manual PYTHONPATH needed (script injects repo root)
@@ -22,18 +23,24 @@ import sys
 from pathlib import Path
 from typing import Optional, List
 
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
 
 def _ensure_repo_on_path(repo: Path) -> None:
     s = str(repo)
     if s not in sys.path:
         sys.path.insert(0, s)
 
-def _run_module(module: str, *, config_path: Path, repo: Path) -> None:
+def _run_module(module: str, *, config_path: Path, repo: Path, extra_args: Optional[List[str]] = None) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+
     cmd = [sys.executable, "-m", module, "--config", str(config_path)]
+    if extra_args:
+        cmd += list(extra_args)
+
     print("\n$ " + " ".join(cmd))
     subprocess.run(cmd, check=True, env=env)
 
@@ -43,9 +50,7 @@ def _find_text_pipeline_module(repo: Path) -> Optional[str]:
     Your repo uses preprocess/preprocess_chinese.py, so include it explicitly.
     """
     preferred = [
-        # <-- your repo's text pipeline
         "preprocess.preprocess_chinese",
-        # other common names (kept for portability)
         "preprocess.preprocess_text",
         "preprocess.preprocess_text_merge",
         "preprocess.preprocess_text_build",
@@ -57,7 +62,6 @@ def _find_text_pipeline_module(repo: Path) -> Optional[str]:
         if importlib.util.find_spec(m) is not None:
             return m
 
-    # fallback scan: accept "text" or "chinese" in filename
     pre_dir = repo / "preprocess"
     if not pre_dir.exists():
         return None
@@ -89,10 +93,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
 
     # steps
-    p.add_argument("--predictive", action="store_true", help="Run preprocess_predictive.")
+    p.add_argument("--asr", action="store_true", help="Run Music_to_text.asr_ncmmsc (ASR -> CSV).")
+    p.add_argument("--predictive", action="store_true", help="Run preprocess_predictive (TSV -> JSONL).")
     p.add_argument("--text", action="store_true", help="Run text preprocessing pipeline (merge/clean).")
     p.add_argument("--cv", action="store_true", help="Run paper.evaluate_cv.")
-    p.add_argument("--all", action="store_true", help="Run predictive + text + cv.")
+    p.add_argument("--all", action="store_true", help="Run ASR + predictive + text + cv.")
+
+    # ASR passthrough (optional)
+    p.add_argument("--asr-labels", nargs="+", default=None, help="Pass to ASR: --labels AD HC (optional).")
+    p.add_argument("--asr-cap-per-label", type=int, default=None, help="Pass to ASR: --cap-per-label N (optional).")
 
     # overrides
     p.add_argument(
@@ -117,6 +126,7 @@ def cli_main() -> None:
         raise FileNotFoundError(f"Config not found: {config_path}")
 
     do_all = bool(args.all)
+    do_asr = do_all or bool(args.asr)
     do_pred = do_all or bool(args.predictive)
     do_text = do_all or bool(args.text)
     do_cv = do_all or bool(args.cv)
@@ -126,7 +136,29 @@ def cli_main() -> None:
     cfg = load_text_config(str(config_path))
     print("[INFO] TOP LEVEL KEYS:", list(cfg.keys()))
 
-    # 1) predictive
+    # 0) ASR
+    if do_asr:
+        asr_extra: List[str] = []
+        if args.asr_labels:
+            asr_extra += ["--labels"] + list(args.asr_labels)
+        if args.asr_cap_per_label is not None:
+            asr_extra += ["--cap-per-label", str(int(args.asr_cap_per_label))]
+
+        # Prefer in-process call if available; fallback to -m
+        try:
+            from Music_to_text.asr_ncmmsc import run_ncmmsc_asr  # type: ignore
+
+            print("[INFO] Running Music_to_text.asr_ncmmsc (in-process)")
+            run_ncmmsc_asr(
+                config_path=str(config_path),
+                labels=list(args.asr_labels) if args.asr_labels else None,
+                cap_per_label=int(args.asr_cap_per_label) if args.asr_cap_per_label is not None else None,
+            )
+        except Exception as e:
+            print("[WARN] In-process ASR failed; fallback to module run. Error:", repr(e))
+            _run_module("Music_to_text.asr_ncmmsc", config_path=config_path, repo=repo, extra_args=asr_extra)
+
+    # 1) predictive (TSV -> JSONL)
     if do_pred:
         try:
             from preprocess.preprocess_predictive import run_predictive_preprocessing  # type: ignore
@@ -137,7 +169,7 @@ def cli_main() -> None:
             print("[WARN] In-process predictive failed; fallback to module run. Error:", repr(e))
             _run_module("preprocess.preprocess_predictive", config_path=config_path, repo=repo)
 
-    # 2) text pipeline
+    # 2) text pipeline (merge/clean)
     if do_text:
         mod = (args.text_module or "").strip() or _find_text_pipeline_module(repo)
         if not mod:
@@ -164,14 +196,20 @@ def cli_main() -> None:
 
     # 3) CV
     if do_cv:
-        from paper.evaluate_cv import run_evaluate_cv  # type: ignore  # noqa: E402
+        try:
+            from paper.evaluate_cv import run_evaluate_cv  # type: ignore  # noqa: E402
 
-        print("[INFO] Running paper.evaluate_cv")
-        run_evaluate_cv(
-            config_path=str(config_path),
-            methods_override=None,
-            reuse_folds=bool(args.reuse_folds),
-        )
+            print("[INFO] Running paper.evaluate_cv (in-process)")
+            run_evaluate_cv(
+                config_path=str(config_path),
+                methods_override=None,
+                reuse_folds=bool(args.reuse_folds),
+            )
+        except Exception as e:
+            print("[WARN] In-process CV failed; fallback to module run. Error:", repr(e))
+            # paper.evaluate_cv should also accept --config
+            extra = ["--reuse-folds"] if bool(args.reuse_folds) else None
+            _run_module("paper.evaluate_cv", config_path=config_path, repo=repo, extra_args=extra)
 
     print("\n===== DONE =====")
     print("config:", config_path)
