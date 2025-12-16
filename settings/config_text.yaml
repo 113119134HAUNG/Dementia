@@ -63,10 +63,12 @@ predictive:
     order_by: "no"
 
 text:
-  ncmmsc_jsonl: &ncmmsc_jsonl "/content/data_Chinese-NCMMSC2021_AD_Competition.jsonl"
   output_dir: "/content/chinese_combined"
   combined_name: "Chinese_Combined.jsonl"
   cleaned_jsonl: "/content/chinese_combined/cleaned.jsonl"
+
+  # NCMMSC JSONL generated from ASR CSV (kept inside output_dir)
+  ncmmsc_jsonl: &ncmmsc_jsonl "/content/chinese_combined/ncmmsc_from_asr.jsonl"
 
   corpora:
     - name: "NCMMSC2021_AD_Competition"
@@ -125,8 +127,7 @@ features:
 
   bert:
     model_name: "/content/models/bert-base-chinese"
-    embedding_strategy: "mean"
-    last_n_layers: 4
+    pooling: "mean"
     max_seq_length: *max_seq_length
     device: "cuda"
     logreg:
@@ -173,7 +174,7 @@ features:
 
     methods: ["tfidf", "bert", "glove", "gemma"]
 
-    tfidf_fit_scope: "full"
+    tfidf_fit_scope: "full"   # "full" | "train"
 
     batch_size: 8
     bert_batch_size: 8
