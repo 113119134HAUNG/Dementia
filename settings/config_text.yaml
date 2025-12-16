@@ -64,7 +64,7 @@ predictive:
   output_egemaps_csv: "/content/predictive_egemaps_features.csv"
   dataset_name: "Chinese_predictive_challenge"
 
-  keep_speakers: &pred_keep_speakers ["<A>", "<B>"]
+  keep_speakers: &pred_keep_speakers ["<B>"]
   tsv:
     keep_speakers: *pred_keep_speakers
     drop_silence: true
@@ -85,7 +85,6 @@ text:
     - name: "TAUKADIAL"
       path: null
 
-  # 建議先把兩個都吃進來，不然你合併 predictive 等於沒用到
   target_datasets:
     - "NCMMSC2021_AD_Competition"
     - "Chinese_predictive_challenge"
@@ -111,8 +110,22 @@ text:
   language_filter:
     drop_languages: ["en"]
 
-  # quality filter (AFTER cleaning)
-  # 這組是「不會砍爆」的預設：先救回樣本量，再看 drop reasons 微調
+  # prompt filter (for ASR mixed speaker)
+  prompt_filter:
+    enabled: true
+    apply_datasets: ["NCMMSC2021_AD_Competition"]
+    mode: "leading"               # leading | any
+    max_leading_sentences: 8
+    min_keep_chars: 20
+    patterns:
+      - "(請|麻煩|可以|可不可以|能不能).{0,8}(告訴我|告诉我|描述|說說|说说|講講|讲讲)"
+      - "(你|您).{0,8}(看到|看見|看见).{0,12}(圖|图片|圖片|這張|这张|這個|这个|畫面|画面|圖上|图上)"
+      - "(他們|他们).{0,10}(在做什麼|在做什么)"
+      - "(越多越好|說得越多越好|说得越多越好|講得越多越好|讲得越多越好)"
+      - "(你覺得|你觉得).{0,16}(在做什麼|在做什么)"
+      - "^(然後呢|然后呢|還有呢|还有呢)"
+
+  # quality filter (AFTER cleaning + prompt_filter)
   quality_filter:
     enabled: true
     min_chars: 15
@@ -120,8 +133,6 @@ text:
     min_han: 6
     max_unk_ratio: 0.75
 
-  # length filter
-  # 小樣本下 mean±std 很容易亂砍，所以加 min_class_n 做保護
   length_filter:
     enabled: true
     std_k: *length_std_k
@@ -199,7 +210,9 @@ features:
     output_indices: "/content/chinese_combined/folds_indices.json"
 
     methods: ["tfidf", "bert", "glove", "gemma"]
-    tfidf_fit_scope: "full"   # "full" | "train"
+
+    # 建議：CV 時 TFIDF vocab 應只 fit train，避免 full-scope leakage
+    tfidf_fit_scope: "train"   # "full" | "train"
 
     batch_size: 8
     bert_batch_size: 8
