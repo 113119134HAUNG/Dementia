@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-preprocess_chinese.py (paper-strict, converged, CV-ready)
-
-This script DOES NOT run ASR or TSV itself.
-It assumes:
-- ASR CSV already exists at asr.output_csv
-- TSV-derived JSONL already exists at predictive.output_text_jsonl (optional; will skip if missing)
+preprocess/preprocess_chinese.py (paper-strict, converged, CV-ready)
 
 Pipeline:
 1) ASR CSV -> NCMMSC JSONL (optional; controlled by flags)
@@ -15,9 +10,9 @@ Pipeline:
 5) Language filter (YAML-driven)
 6) Pre-clean subset (restrict dataset/labels only; NO balance/cap yet)
 7) Clean text (tools.text_cleaning)
-8) Quality filter (drop low-information / garbage text; YAML-driven)
+8) Quality filter (drop low-information / garbage text; YAML-driven, with drop-reason stats)
 9) Final subset (apply_subset again to balance/cap on cleaned data)
-10) Length filter (YAML-driven)
+10) Length filter (YAML-driven; auto-skip on small class size)
 11) Save cleaned.jsonl (single set; no split)
 """
 
@@ -225,48 +220,93 @@ def quality_filter(
     *,
     enabled: bool,
     min_chars: int,
+    min_lex_chars: int,
     min_han: int,
     max_unk_ratio: float,
     unk_token: str = UNK_TOKEN,
 ) -> pd.DataFrame:
     """
-    Drop low-information samples:
-      - too short
-      - too few Chinese characters (Han)
-      - too high ratio of UNK token
+    Drop low-information samples (after cleaning):
+
+    Keep if all pass:
+      - total chars >= min_chars
+      - lexical chars (remove UNK + markers + whitespace) >= min_lex_chars
+      - Han chars (after removing UNK + markers) >= min_han
+      - UNK char-mass ratio <= max_unk_ratio
+
+    Also prints drop-reason stats for tuning.
     """
     if not enabled or df is None or df.empty:
         return df
 
     out = df.copy()
-    s = out["Text_interviewer_participant"].fillna("").astype(str)
+    s = out["Text_interviewer_participant"].fillna("").astype(str).str.strip()
 
-    # 1) minimum length
-    keep = s.str.strip().str.len() >= int(min_chars)
+    # total length
+    total_len = s.str.len()
 
-    # 2) count Han chars after removing UNK token
-    s_wo_unk = s.str.replace(unk_token, "", regex=False)
-    han_cnt = s_wo_unk.str.count(r"[\u4e00-\u9fff]")
-    keep &= han_cnt >= int(min_han)
+    # "lexical" view: remove UNK + known markers (paper markers) then remove whitespace
+    # (we don't rely on tokenization because Chinese is often no-space)
+    marker_pat = r"(\[//\]|\[/\]|\[\+\s*gram\]|\<\.\.\.\>|&-(?:uh|um))"
+    lex = s.str.replace(unk_token, "", regex=False)
+    lex = lex.str.replace(marker_pat, "", regex=True)
+    lex_nos = lex.str.replace(r"\s+", "", regex=True)
 
-    # 3) UNK ratio by character mass (approx)
-    total_len = s.str.len().clip(lower=1)
+    lex_len = lex_nos.str.len()
+    han_cnt = lex.str.count(r"[\u4e00-\u9fff]")
+
+    # UNK ratio by char-mass approximation
+    total_len_safe = total_len.clip(lower=1)
     unk_count = s.str.count(unk_token)
     unk_char_mass = unk_count * len(unk_token)
-    unk_ratio = (unk_char_mass / total_len)
-    keep &= unk_ratio <= float(max_unk_ratio)
+    unk_ratio = (unk_char_mass / total_len_safe)
+
+    cond_chars = total_len >= int(min_chars)
+    cond_lex = lex_len >= int(min_lex_chars)
+    cond_han = han_cnt >= int(min_han)
+    cond_unk = unk_ratio <= float(max_unk_ratio)
+
+    keep = cond_chars & cond_lex & cond_han & cond_unk
+
+    # ---- drop reason stats (non-exclusive) ----
+    n0 = len(out)
+    dropped = int((~keep).sum())
+    print(f"[INFO] Quality filter: {n0} -> {n0 - dropped} (dropped {dropped})")
+    print(
+        "[INFO] Quality filter drop reasons (counts, may overlap): "
+        f"short={int((~cond_chars).sum())}, "
+        f"low_lex={int((~cond_lex).sum())}, "
+        f"low_han={int((~cond_han).sum())}, "
+        f"high_unk={int((~cond_unk).sum())}"
+    )
 
     filtered = out.loc[keep].reset_index(drop=True)
-    print(f"[INFO] Quality filter: {len(out)} -> {len(filtered)} (dropped {len(out)-len(filtered)})")
     if not filtered.empty:
         print("[INFO] Label distribution after quality filter:\n", filtered["Diagnosis"].value_counts())
     return filtered
 
-def length_filter(df: pd.DataFrame, *, enabled: bool, std_k: float) -> pd.DataFrame:
+def length_filter(
+    df: pd.DataFrame,
+    *,
+    enabled: bool,
+    std_k: float,
+    min_class_n: int = 30,
+) -> pd.DataFrame:
+    """
+    Length filter by class mean ± k*std.
+
+    Safety:
+      - if any class has < min_class_n samples, skip (prevents tiny-N instability).
+    """
     if not enabled or df is None or df.empty:
         return df
     if std_k < 0:
         raise ValueError("text.length_filter.std_k must be >= 0.")
+
+    vc = df["Diagnosis"].value_counts()
+    if (vc < int(min_class_n)).any():
+        print(f"[INFO] Length filter skipped (min_class_n={min_class_n}, class_counts={vc.to_dict()}).")
+        return df
 
     out = df.copy()
     out["length"] = out["Text_interviewer_participant"].apply(len)
@@ -288,9 +328,7 @@ def length_filter(df: pd.DataFrame, *, enabled: bool, std_k: float) -> pd.DataFr
     keep = (merged["length"] >= lower) & (merged["length"] <= upper)
 
     filtered = out.loc[keep.values].reset_index(drop=True)
-
-    if "length" in filtered.columns:
-        filtered = filtered.drop(columns=["length"])
+    filtered = filtered.drop(columns=["length"], errors="ignore")
 
     print(f"[INFO] After length filtering: {len(filtered)} samples remaining.")
     if not filtered.empty:
@@ -322,20 +360,22 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     if df.empty:
         return df.reset_index(drop=True)
 
-    # (C) quality filter (YAML-driven; defaults if missing)
+    # (C) quality filter (YAML-driven; safe defaults)
     qf_cfg = text_cfg.get("quality_filter", {})
     if not isinstance(qf_cfg, dict):
         qf_cfg = {}
 
     qf_enabled = bool(qf_cfg.get("enabled", True))
-    min_chars = int(qf_cfg.get("min_chars", 30))
-    min_han = int(qf_cfg.get("min_han", 20))
-    max_unk_ratio = float(qf_cfg.get("max_unk_ratio", 0.30))
+    min_chars = int(qf_cfg.get("min_chars", 15))
+    min_lex_chars = int(qf_cfg.get("min_lex_chars", 8))
+    min_han = int(qf_cfg.get("min_han", 6))
+    max_unk_ratio = float(qf_cfg.get("max_unk_ratio", 0.75))
 
     df = quality_filter(
         df,
         enabled=qf_enabled,
         min_chars=min_chars,
+        min_lex_chars=min_lex_chars,
         min_han=min_han,
         max_unk_ratio=max_unk_ratio,
         unk_token=UNK_TOKEN,
@@ -354,7 +394,9 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     lf_cfg = _get_dict(text_cfg, "length_filter", where="text")
     enabled = bool(lf_cfg.get("enabled", True))
     std_k = float(_require(lf_cfg, "std_k", where="text.length_filter"))
-    df = length_filter(df, enabled=enabled, std_k=std_k)
+    min_class_n = int(lf_cfg.get("min_class_n", 30))
+
+    df = length_filter(df, enabled=enabled, std_k=std_k, min_class_n=min_class_n)
 
     df = _stable_sort(df).reset_index(drop=True)
     return df
