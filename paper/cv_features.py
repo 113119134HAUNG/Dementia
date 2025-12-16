@@ -112,8 +112,9 @@ def bert_embeddings_all(
     max_seq_length: int,
     device: str,
     batch_size: int,
-    embedding_strategy: str = "mean",   # mean | cls | last4_concat_mean
-    last_n_layers: int = 4,            # for last4_concat_mean
+    embedding_strategy: Optional[str] = None,  # mean | cls | last4_concat_mean
+    pooling: Optional[str] = None,             # backward-compat alias (evaluate_cv may pass this)
+    last_n_layers: int = 4,                    # for last4_concat_mean
 ) -> np.ndarray:
     try:
         import torch
@@ -121,9 +122,10 @@ def bert_embeddings_all(
     except Exception as e:  # noqa: BLE001
         raise ImportError("BERT evaluation requires torch + transformers installed.") from e
 
-    strat = (embedding_strategy or "mean").strip().lower()
+    # Use embedding_strategy first; fall back to pooling; default mean
+    strat = (embedding_strategy or pooling or "mean").strip().lower()
     if strat not in ("mean", "cls", "last4_concat_mean"):
-        raise ValueError("features.bert.embedding_strategy must be one of: mean | cls | last4_concat_mean")
+        raise ValueError("features.bert.embedding_strategy/pooling must be one of: mean | cls | last4_concat_mean")
 
     tok = AutoTokenizer.from_pretrained(model_name)
     mdl = AutoModel.from_pretrained(model_name)
@@ -156,8 +158,8 @@ def bert_embeddings_all(
                 hs = outputs.hidden_states  # tuple: (emb, l1, ..., lL)
                 if hs is None or len(hs) < (ln + 1):
                     raise ValueError("BERT did not return enough hidden_states for last4_concat_mean.")
-                last4 = torch.cat(hs[-ln:], dim=-1)  # (B,T,H*ln)
-                last_np = last4.detach().cpu().numpy()
+                lastn = torch.cat(hs[-ln:], dim=-1)  # (B,T,H*ln)
+                last_np = lastn.detach().cpu().numpy()
             else:
                 outputs = mdl(**enc)
                 last = outputs.last_hidden_state  # (B,T,H)
@@ -167,7 +169,7 @@ def bert_embeddings_all(
             att_np = att.detach().cpu().numpy() if att is not None else None
 
             if strat == "cls":
-                sent = last_np[:, 0, :]  # (B,H)
+                sent = last_np[:, 0, :]  # (B,H) or (B,H*ln)
             else:
                 if att_np is None:
                     sent = last_np.mean(axis=1)
