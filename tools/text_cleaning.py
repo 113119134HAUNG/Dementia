@@ -7,6 +7,7 @@ Text cleaning utilities (paper-aligned, strict + minimal).
 NEW in this revision:
 - Prompt filter sentence splitter more robust for ASR that lacks 。！？:
   include ， 、 , as weak sentence boundaries to avoid "whole paragraph becomes one sentence" over-drop.
+- Remove dialect/meta tags like 【上海话】/【上海話】/【方言】 to avoid shortcut features.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ def _is_missing(x: TextLike) -> bool:
             return False
     return False
 
+
 def _to_str(x: TextLike) -> str:
     return "" if _is_missing(x) else str(x)
 
@@ -45,7 +47,7 @@ BRACKET_ANY_PATTERN = re.compile(r"\[[^\]]*\]")
 # =====================================================================
 # Unintelligible token normalization
 # =====================================================================
-UNK_TOKEN = "【聽不清楚】","【上海话】"
+UNK_TOKEN = "【聽不清楚】"
 UNK_ANY_PATTERN = re.compile(r"[\[\【]\s*聽不清楚\s*[\]\】]")
 UNK_DUP_PATTERN = re.compile(rf"(?:{re.escape(UNK_TOKEN)}\s*){{2,}}")
 
@@ -65,6 +67,7 @@ _ALLOWED_CHARS_PATTERN = re.compile(
     r"\.,!?;:\"“”'·]+"
 )
 
+
 def sanitize_weird_unicode(t: str) -> str:
     if not t:
         return ""
@@ -83,6 +86,7 @@ ZHUYIN_PATTERN = re.compile(
     r"ㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ]+"
 )
 MULTI_HMM_PATTERN = re.compile(r"(嗯[\s、，,.!?]*){2,}")
+
 
 def clean_asr_chinese(text: TextLike) -> str:
     t = _to_str(text)
@@ -135,6 +139,10 @@ DUP_PAUSE_PATTERN = re.compile(r"(<\.\.\.>)(?:\s+\1)+")
 DUP_GRAM_PATTERN = re.compile(r"(\[\+\s*gram\])(?:\s+\1)+", flags=re.IGNORECASE)
 DUP_FILLPAUSE_PATTERN = re.compile(r"(&-(?:uh|um))(?:\s+\1)+", flags=re.IGNORECASE)
 
+# Dialect / meta tags like 【上海话】/【上海話】/【方言】
+# NOTE: does NOT match 【聽不清楚】.
+DIALECT_TAG_PATTERN = re.compile(r"【\s*[^】]{0,12}(?:话|話)\s*】|【\s*方言\s*】")
+
 def _keep_allowed_fillpause(m: re.Match) -> str:
     w = m.group(1).lower()
     return f" &-{w} " if w in ALLOWED_FILLPAUSES else " "
@@ -153,41 +161,57 @@ def clean_structured_chinese(text: TextLike) -> str:
     t = t.replace("\u00A0", " ")
     t = _normalize_unk(t)
 
+    # Speaker labels
     t = SPEAKER_EN_PATTERN.sub("", t)
     t = SPEAKER_NUM_PATTERN.sub("", t)
     t = SPEAKER_ZH_PATTERN.sub("", t)
 
+    # .cha-like markers
     t = TIME_CODE_PATTERN.sub("", t)
     t = MOR_PAR_PATTERN.sub("", t)
     t = POS_TAG_PATTERN.sub("", t)
 
+    # Normalize key markers first
     t = PAUSE_PATTERN.sub(" <...> ", t)
     t = GRAM_PATTERN.sub(" [+ gram] ", t)
-
     t = RETRACE_PATTERN.sub(" [//] ", t)
     t = REPEAT_PATTERN.sub(" [/] ", t)
 
+    # Filled pauses: keep only uh/um
     t = FILLPAUSE_PATTERN.sub(_keep_allowed_fillpause, t)
+
+    # TSV convention: "&嗯" / "&啊" / ... -> keep the CJK char
     t = AMP_CJK_PATTERN.sub(r"\1", t)
 
+    # Remove other [...] but keep the 3 markers
     def _drop_other_brackets(m: re.Match) -> str:
         s = m.group(0)
         s_norm = WS_PATTERN.sub(" ", s.strip())
         return s_norm if s_norm in KEEP_BRACKET_MARKERS else " "
 
     t = BRACKET_ANY_PATTERN.sub(_drop_other_brackets, t)
+
+    # Remove other <...> (except literal "<...>")
     t = DROP_ANGLE_EXCEPT_PAUSE_PATTERN.sub(" ", t)
 
+    # Remove (...), misc symbols
     t = PAREN_PATTERN.sub(" ", t)
     t = t.replace("‡", " ")
 
+    # Researcher codes
     t = DROP_PLUS_ANGLE_PATTERN.sub(" ", t)
     t = DROP_PLUS_CODE_PATTERN.sub(" ", t)
 
+    # Remove &codes except &-word (we already normalized/dropped &-* above)
     t = DROP_AMP_CODES_PATTERN.sub(" ", t)
 
+    # Remove dialect/meta tags
+    t = DIALECT_TAG_PATTERN.sub(" ", t)
+
+    # sanitize weird unicode
     t = sanitize_weird_unicode(t)
 
+    # Final whitespace + appropriate collapse
     t = WS_PATTERN.sub(" ", t).strip()
     t = _collapse_marker_dups(t)
     t = _normalize_unk(t)
