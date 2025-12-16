@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-cv_features.py
+paper/cv_features.py
 
 Feature extraction only:
 - TF-IDF
@@ -12,6 +12,10 @@ NOTE (paper-strict):
 - YAML often loads ngram_range as a list [a, b]
 - Newer scikit-learn requires CountVectorizer.ngram_range to be a tuple (a, b)
   -> We coerce list->tuple in TF-IDF helpers (single responsibility, no config hacks).
+
+Back-compat:
+- evaluate_cv in some repos passes `pooling=` into bert_embeddings_all().
+  -> We accept pooling as an alias of embedding_strategy.
 """
 
 from __future__ import annotations
@@ -113,19 +117,29 @@ def bert_embeddings_all(
     device: str,
     batch_size: int,
     embedding_strategy: Optional[str] = None,  # mean | cls | last4_concat_mean
-    pooling: Optional[str] = None,             # backward-compat alias (evaluate_cv may pass this)
+    pooling: Optional[str] = None,             # backward-compat alias
     last_n_layers: int = 4,                    # for last4_concat_mean
 ) -> np.ndarray:
+    """
+    BERT sentence embeddings.
+
+    strat:
+      - "mean"              : masked mean over tokens
+      - "cls"               : CLS token embedding
+      - "last4_concat_mean" : concat last-N layers -> masked mean
+    """
     try:
         import torch
         from transformers import AutoTokenizer, AutoModel
     except Exception as e:  # noqa: BLE001
         raise ImportError("BERT evaluation requires torch + transformers installed.") from e
 
-    # Use embedding_strategy first; fall back to pooling; default mean
+    # Prefer embedding_strategy; fall back to pooling; default mean
     strat = (embedding_strategy or pooling or "mean").strip().lower()
     if strat not in ("mean", "cls", "last4_concat_mean"):
-        raise ValueError("features.bert.embedding_strategy/pooling must be one of: mean | cls | last4_concat_mean")
+        raise ValueError(
+            "features.bert.embedding_strategy/pooling must be one of: mean | cls | last4_concat_mean"
+        )
 
     tok = AutoTokenizer.from_pretrained(model_name)
     mdl = AutoModel.from_pretrained(model_name)
