@@ -1,37 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-text_cleaning.py
+tools/text_cleaning.py
 
 Text cleaning utilities (paper-aligned, strict + minimal).
 
-Markers policy (paper-aligned)
-------------------------------
-- In CHAT-style *annotation markers*, keep ONLY:
-    &-uh / &-um, [//], [/], <...>, [+ gram]
-- All other annotation markers are removed.
-- Lexical content (Chinese/English words) is preserved.
-
-Additional rules
-----------------
-- Collapse consecutive duplicates of: <...>, [+ gram], &-uh/&-um
-  (do NOT collapse [//] or [/])
-
-TSV convention note
--------------------
-- Some TSVs encode Chinese fillers as &嗯 / &啊 / &呃 ... (NOT CHAT markers).
-  We strip the leading '&' and keep the CJK char to avoid losing disfluencies.
-
-NEW (robustness)
-----------------
-- Normalize all "unintelligible" variants:
-    [聽不清楚], 【聽不清楚】 -> 【聽不清楚】
-- Collapse consecutive duplicates of 【聽不清楚】
-- Sanitize weird unicode (e.g., ﻌﻌﻌ) via a conservative allowlist
-
-NEW (ASR prompt filter)
-----------------------
-- ASR may contain interviewer prompts (no speaker tags).
-- We provide prompt_filter_text(): remove prompt-like sentences conservatively.
+NEW in this revision:
+- Prompt filter sentence splitter more robust for ASR that lacks 。！？:
+  include ， 、 , as weak sentence boundaries to avoid "whole paragraph becomes one sentence" over-drop.
 """
 
 from __future__ import annotations
@@ -57,7 +32,6 @@ def _is_missing(x: TextLike) -> bool:
         except (TypeError, ValueError):
             return False
     return False
-
 
 def _to_str(x: TextLike) -> str:
     return "" if _is_missing(x) else str(x)
@@ -223,7 +197,8 @@ def clean_structured_chinese(text: TextLike) -> str:
 # =====================================================================
 # Prompt filter (ASR mixed speaker)
 # =====================================================================
-SENT_SPLIT_PATTERN = re.compile(r"(?<=[。！？!?；;\n])\s*")
+# NOTE: add ，、, to avoid whole-paragraph as single sentence when ASR lacks 。！？.
+SENT_SPLIT_PATTERN = re.compile(r"(?<=[。！？!?；;，,、\n])\s*")
 
 def prompt_filter_text(
     text: TextLike,
