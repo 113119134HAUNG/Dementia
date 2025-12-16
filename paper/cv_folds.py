@@ -14,7 +14,7 @@ from typing import List, Tuple
 import numpy as np
 from sklearn.model_selection import StratifiedKFold
 
-from cv_utils import ensure_parent
+from paper.cv_utils import ensure_parent
 
 def build_folds_indices(
     y: np.ndarray,
