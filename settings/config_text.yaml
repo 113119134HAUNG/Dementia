@@ -1,288 +1,212 @@
-# -*- coding: utf-8 -*-
-"""
-text_cleaning.py
-
-Text cleaning utilities (paper-aligned, strict + minimal).
-
-Markers policy (paper-aligned)
-------------------------------
-- In CHAT-style *annotation markers*, keep ONLY:
-    &-uh / &-um, [//], [/], <...>, [+ gram]
-- All other annotation markers are removed.
-- Lexical content (Chinese/English words) is preserved.
-
-Additional rules
-----------------
-- Collapse consecutive duplicates of: <...>, [+ gram], &-uh/&-um
-  (do NOT collapse [//] or [/])
-
-TSV convention note
--------------------
-- Some TSVs encode Chinese fillers as &嗯 / &啊 / &呃 ... (NOT CHAT markers).
-  We strip the leading '&' and keep the CJK char to avoid losing disfluencies.
-
-NEW (robustness)
-----------------
-- Normalize all "unintelligible" variants:
-    [聽不清楚], 【聽不清楚】 -> 【聽不清楚】
-- Collapse consecutive duplicates of 【聽不清楚】
-- Sanitize weird unicode (e.g., ﻌﻌﻌ) via a conservative allowlist
-"""
-
-from __future__ import annotations
-
-import math
-import numbers
-import re
-from typing import Union
-
-TextLike = Union[str, float]
-
 # =====================================================================
-# Small helpers (no extra deps)
+# config_text.yaml (single source of truth, paper-strict, converged)
 # =====================================================================
-def _is_missing(x: TextLike) -> bool:
-    if x is None:
-        return True
-    if isinstance(x, str):
-        return False
-    if isinstance(x, numbers.Real):
-        try:
-            return math.isnan(float(x))
-        except (TypeError, ValueError):
-            return False
-    return False
 
+common:
+  seed: &seed 42
 
-def _to_str(x: TextLike) -> str:
-    return "" if _is_missing(x) else str(x)
+  # preprocessing (kept for future split-eval; CV pipeline currently doesn't use split)
+  split_test_size: &split_test_size 0.2
+  length_std_k: &length_std_k 1.0
+  min_per_class: &min_per_class 2
 
-# =====================================================================
-# Shared regex
-# =====================================================================
-WS_PATTERN = re.compile(r"\s+")
-BRACKET_ANY_PATTERN = re.compile(r"\[[^\]]*\]")
+  # modeling
+  logreg_C: &logreg_C 1.0
+  logreg_max_iter: &logreg_max_iter 1000
+  max_seq_length: &max_seq_length 512
 
-# =====================================================================
-# Unintelligible token normalization
-# =====================================================================
-UNK_TOKEN = "【聽不清楚】"
-UNK_ANY_PATTERN = re.compile(r"[\[\【]\s*聽不清楚\s*[\]\】]")
-UNK_DUP_PATTERN = re.compile(rf"(?:{re.escape(UNK_TOKEN)}\s*){{2,}}")
+asr:
+  # choose ONE:
+  data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/raw_vad"
+  # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/raw"
+  # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
+  # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge_vad"
 
-def _normalize_unk(t: str) -> str:
-    # unify all variants to UNK_TOKEN
-    t = UNK_ANY_PATTERN.sub(UNK_TOKEN, t)
-    # collapse duplicates
-    t = UNK_DUP_PATTERN.sub(f"{UNK_TOKEN} ", t)
-    return t
+  output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
+  model_size: "large-v2"
+  device: "cuda"
+  compute_type: "float16"
 
-# =====================================================================
-# Weird unicode sanitizer (allowlist)
-#   - keeps Chinese, Latin, digits, common punctuation, and CHAT markers symbols
-# =====================================================================
-_ALLOWED_CHARS_PATTERN = re.compile(
-    r"[^\u4e00-\u9fffA-Za-z0-9\s"
-    r"\[\]\(\)<>"
-    r"&\+\-_/\\"
-    r"，。！？；：、（）「」『』《》…【】"
-    r"\.,!?;:\"“”'·]+"
-)
+  initial_prompt: |-
+    以下是一段中文口語錄音的逐字稿，內容為針對失智症、阿茲海默症、
+    輕度認知障礙（MCI）與健康對照組（HC）的臨床訪談與語言測驗，
+    包括圖畫描述任務、語意流暢度測驗以及日常生活相關問答。
+    請以繁體中文完整逐字轉寫受試者與訪談者的口語內容，不要翻譯、
+    不要潤飾或做任何摘要，也不要自行更改語序或補上沒聽到的字。
+    請保留口語語氣詞與猶豫聲（例如：嗯、呃、啊、就是、然後）、
+    重複、修正、語法不完整或中斷的句子，這些特徵可能與認知功能相關。
+    遇到下列專有名詞或相關用語時，請盡量使用常見且一致的寫法：
+    「失智症」、「阿茲海默症」、「阿茲海默病」、「輕度認知障礙」、
+    「MCI」、「AD」、「HC」、「記憶力」、「認知功能」、
+    「量表」、「測驗」、「醫師」、「受試者」、「照顧者」。
+    對於 AD、MCI、HC 等縮寫，請以大寫英文字母保留。
+    若有單字實在聽不清楚，請不要亂猜，可以以『【聽不清楚】』標示。
 
-def sanitize_weird_unicode(t: str) -> str:
-    if not t:
-        return ""
-    t = t.replace("\u00A0", " ")
-    t = _ALLOWED_CHARS_PATTERN.sub(" ", t)
-    t = WS_PATTERN.sub(" ", t).strip()
-    return t
+  decode:
+    language: "zh"
+    task: "transcribe"
+    beam_size: 10
+    patience: 1.0
+    length_penalty: 1.0
+    temperature: 0.0
+    compression_ratio_threshold: 2.4
+    log_prob_threshold: -1.0
+    no_speech_threshold: 0.6
+    condition_on_previous_text: true
+    vad_filter: false
+    without_timestamps: true
 
-# =====================================================================
-# ASR-level cleaning (light, deterministic)
-# =====================================================================
-ZHUYIN_PATTERN = re.compile(
-    r"[ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒ"
-    r"ㄓㄔㄕㄖㄗㄘㄙ"
-    r"ㄧㄨㄩ"
-    r"ㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ]+"
-)
-MULTI_HMM_PATTERN = re.compile(r"(嗯[\s、，,.!?]*){2,}")
+predictive:
+  meta_csv: "/content/NCMMSC2021_AD_Competition-dev/2_final_list_train.csv"
+  egemaps_csv: "/content/NCMMSC2021_AD_Competition-dev/egemaps_final.csv"
+  tsv_root: "/content/NCMMSC2021_AD_Competition-dev/tsv2"
+  output_text_jsonl: &predictive_jsonl "/content/Chinese-predictive_challenge_tsv2_output.jsonl"
+  output_egemaps_csv: "/content/predictive_egemaps_features.csv"
+  dataset_name: "Chinese_predictive_challenge"
 
-def clean_asr_chinese(text: TextLike) -> str:
-    t = _to_str(text)
-    if not t:
-        return ""
+  keep_speakers: &pred_keep_speakers ["<A>", "<B>"]
+  tsv:
+    keep_speakers: *pred_keep_speakers
+    drop_silence: true
+    order_by: "no"
 
-    # normalize UNK variants early
-    t = _normalize_unk(t)
+text:
+  output_dir: "/content/chinese_combined"
+  combined_name: "Chinese_Combined.jsonl"
+  cleaned_jsonl: "/content/chinese_combined/cleaned.jsonl"
 
-    # Zhuyin -> "嗯" (paper-aligned)
-    t = ZHUYIN_PATTERN.sub("嗯", t)
-    t = MULTI_HMM_PATTERN.sub("嗯 ", t)
+  # NCMMSC JSONL generated from ASR CSV (kept inside output_dir)
+  ncmmsc_jsonl: &ncmmsc_jsonl "/content/chinese_combined/ncmmsc_from_asr.jsonl"
 
-    # sanitize weird unicode (fixes ﻌﻌﻌ-like garbage)
-    t = sanitize_weird_unicode(t)
+  corpora:
+    - name: "NCMMSC2021_AD_Competition"
+      path: *ncmmsc_jsonl
+    - name: "Chinese_predictive_challenge"
+      path: *predictive_jsonl
+    - name: "TAUKADIAL"
+      path: null
 
-    # keep UNK token (do NOT delete here; quality_filter will handle high-UNK cases)
-    t = _normalize_unk(t)
+  # Restrict evaluation set (what you actually model on)
+  target_datasets: ["NCMMSC2021_AD_Competition"]
+  target_labels: ["AD", "HC"]
 
-    t = WS_PATTERN.sub(" ", t).strip()
-    return t
+  balance: true
+  subset_seed: *seed
+  cap_per_class: 300
 
-# =====================================================================
-# Structured transcript cleaning (paper-aligned, strict)
-# =====================================================================
-PAUSE_PATTERN = re.compile(r"<\s*(?:\.\s*){3,}>")  # < . . . > -> <...>
-GRAM_PATTERN = re.compile(r"\[\+\s*gram\s*\]", flags=re.IGNORECASE)  # -> [+ gram]
+  label_map:
+    NC: "HC"
+    CN: "HC"
+    CTRL: "HC"
+    CONTROL: "HC"
+    CONTROLS: "HC"
+    HEALTHY: "HC"
+    NORMAL: "HC"
+    PROBABLEAD: "AD"
+    POSSIBLEAD: "AD"
+    MILDCOGNITIVEIMPAIRMENT: "MCI"
 
-# Normalize retrace/repeat variants (allow spaces inside)
-RETRACE_PATTERN = re.compile(r"\[\s*//\s*\]")
-REPEAT_PATTERN = re.compile(r"\[\s*/\s*\]")
+  language_filter:
+    drop_languages: ["en"]
 
-KEEP_BRACKET_MARKERS = {"[//]", "[/]", "[+ gram]"}
+  # NEW: quality filter (dataset-level, after cleaning)
+  quality_filter:
+    enabled: true
+    # 文字太短/太空會造成模型亂學（尤其 TFIDF char ngram）
+    min_chars: 30
+    # 至少要有一些中文資訊量（扣掉【聽不清楚】後計算）
+    min_han: 20
+    # 【聽不清楚】占比太高的樣本剔除
+    max_unk_ratio: 0.30
 
-SPEAKER_EN_PATTERN = re.compile(r"\b(Doctor|Patient|Interviewer)\s*[:：]", flags=re.IGNORECASE)
-SPEAKER_NUM_PATTERN = re.compile(r"Speaker\s*\d+\s*[:：]", flags=re.IGNORECASE)
-SPEAKER_ZH_PATTERN = re.compile(r"(醫生|病人|受試者)\s*[:：]")
+  length_filter:
+    enabled: true
+    std_k: *length_std_k
 
-TIME_CODE_PATTERN = re.compile(r"\d+_\d+")
-MOR_PAR_PATTERN = re.compile(r"(%\w+|\*[A-Z]+):")
-POS_TAG_PATTERN = re.compile(r"\b\w+:\w+\|\w+")
+features:
+  tfidf:
+    vectorizer:
+      analyzer: "char"
+      # IMPORTANT: sklearn needs tuple, not list
+      ngram_range: !!python/tuple [2, 4]
+      lowercase: false
+      max_features: 50000
+      stop_words: null
+      min_df: 1
+      max_df: 1.0
+    transformer:
+      use_idf: true
+      smooth_idf: true
+      norm: "l2"
+      sublinear_tf: false
+    logreg:
+      C: *logreg_C
+      class_weight: "balanced"
+      solver: "lbfgs"
+      max_iter: *logreg_max_iter
+      random_state: *seed
 
-# STRICT: keep ONLY these filled pauses
-ALLOWED_FILLPAUSES = {"uh", "um"}
-FILLPAUSE_PATTERN = re.compile(r"(?i)&-([a-z]+)")
+  bert:
+    model_name: "/content/models/bert-base-chinese"
+    embedding_strategy: "mean"   # mean | cls | last4_concat_mean
+    pooling: "mean"             # keep for compatibility (evaluate_cv may read it)
+    last_n_layers: 4
+    max_seq_length: *max_seq_length
+    device: "cuda"
+    logreg:
+      C: *logreg_C
+      class_weight: "balanced"
+      solver: "lbfgs"
+      max_iter: *logreg_max_iter
+      random_state: *seed
 
-# TSV convention: "&嗯" / "&啊" / "&呃" ... -> keep the CJK char, drop leading '&'
-AMP_CJK_PATTERN = re.compile(r"&([\u4e00-\u9fff])")
+  glove:
+    embeddings_path: "/content/embeddings/cc.zh.300.vec"
+    embedding_dim: 300
+    tokenizer: "jieba"
+    max_words: 50000
+    lowercase: false
+    remove_stopwords: false
+    stopwords_lang: null
+    pooling: "sum_l2norm"
+    logreg:
+      C: *logreg_C
+      class_weight: "balanced"
+      solver: "lbfgs"
+      max_iter: *logreg_max_iter
+      random_state: *seed
 
-DROP_AMP_CODES_PATTERN = re.compile(r"&(?!(?:-[A-Za-z]+))\S+")
+  gemma:
+    model_name: "/content/models/google__gemma-2b"
+    pooling: "mean"
+    max_seq_length: *max_seq_length
+    device: "cuda"
+    logreg:
+      C: *logreg_C
+      class_weight: "balanced"
+      solver: "lbfgs"
+      max_iter: *logreg_max_iter
+      random_state: *seed
 
-# Researcher codes
-DROP_PLUS_ANGLE_PATTERN = re.compile(r"\+<[^>]*>")
+  crossval:
+    enabled: true
+    n_splits: 5
+    shuffle: true
+    random_state: *seed
+    output_indices: "/content/chinese_combined/folds_indices.json"
 
-# IMPORTANT: be conservative to avoid killing lexical forms like "C++"
-# Only drop "+CODE" when it looks like a standalone annotation token:
-DROP_PLUS_CODE_PATTERN = re.compile(r"(?:(?<=\s)|^)\+[A-Za-z0-9_-]+(?=(?:\s|$))")
+    methods: ["tfidf", "bert", "glove", "gemma"]
 
-PAREN_PATTERN = re.compile(r"\([^)]*\)")
-DROP_ANGLE_EXCEPT_PAUSE_PATTERN = re.compile(r"<(?!\.\.\.>)[^>]*>")  # keep literal <...>
+    tfidf_fit_scope: "full"   # "full" | "train"
 
-# collapse consecutive duplicates (only these)
-DUP_PAUSE_PATTERN = re.compile(r"(<\.\.\.>)(?:\s+\1)+")
-DUP_GRAM_PATTERN = re.compile(r"(\[\+\s*gram\])(?:\s+\1)+", flags=re.IGNORECASE)
-DUP_FILLPAUSE_PATTERN = re.compile(r"(&-(?:uh|um))(?:\s+\1)+", flags=re.IGNORECASE)
+    batch_size: 8
+    bert_batch_size: 8
+    gemma_batch_size: 4
 
-def _keep_allowed_fillpause(m: re.Match) -> str:
-    w = m.group(1).lower()
-    return f" &-{w} " if w in ALLOWED_FILLPAUSES else " "
+    metrics_average: "macro"
+    zero_division: 0
+    metrics_output: "/content/chinese_combined/cv_metrics.json"
 
-def _collapse_marker_dups(t: str) -> str:
-    t = DUP_PAUSE_PATTERN.sub(r"\1", t)
-    t = DUP_GRAM_PATTERN.sub("[+ gram]", t)
-    t = DUP_FILLPAUSE_PATTERN.sub(lambda m: m.group(1).lower(), t)
-    return t
-
-def clean_structured_chinese(text: TextLike) -> str:
-    t = _to_str(text)
-    if not t:
-        return ""
-
-    t = t.replace("\u00A0", " ")
-
-    # normalize UNK variants early
-    t = _normalize_unk(t)
-
-    # Speaker labels
-    t = SPEAKER_EN_PATTERN.sub("", t)
-    t = SPEAKER_NUM_PATTERN.sub("", t)
-    t = SPEAKER_ZH_PATTERN.sub("", t)
-
-    # .cha-like markers
-    t = TIME_CODE_PATTERN.sub("", t)
-    t = MOR_PAR_PATTERN.sub("", t)
-    t = POS_TAG_PATTERN.sub("", t)
-
-    # Normalize key markers first
-    t = PAUSE_PATTERN.sub(" <...> ", t)
-    t = GRAM_PATTERN.sub(" [+ gram] ", t)
-
-    t = RETRACE_PATTERN.sub(" [//] ", t)
-    t = REPEAT_PATTERN.sub(" [/] ", t)
-
-    # Filled pauses: keep only uh/um
-    t = FILLPAUSE_PATTERN.sub(_keep_allowed_fillpause, t)
-
-    # TSV convention: keep CJK fillers with leading '&'
-    t = AMP_CJK_PATTERN.sub(r"\1", t)
-
-    # Remove other [...] but keep the 3 markers
-    def _drop_other_brackets(m: re.Match) -> str:
-        s = m.group(0)
-        s_norm = WS_PATTERN.sub(" ", s.strip())
-        return s_norm if s_norm in KEEP_BRACKET_MARKERS else " "
-
-    t = BRACKET_ANY_PATTERN.sub(_drop_other_brackets, t)
-
-    # Remove other <...> (except literal "<...>")
-    t = DROP_ANGLE_EXCEPT_PAUSE_PATTERN.sub(" ", t)
-
-    # Remove (...), misc symbols
-    t = PAREN_PATTERN.sub(" ", t)
-    t = t.replace("‡", " ")
-
-    # Researcher codes
-    t = DROP_PLUS_ANGLE_PATTERN.sub(" ", t)
-    t = DROP_PLUS_CODE_PATTERN.sub(" ", t)
-
-    # Remove &codes except &-word (we already normalized/dropped &-* above)
-    t = DROP_AMP_CODES_PATTERN.sub(" ", t)
-
-    # sanitize weird unicode
-    t = sanitize_weird_unicode(t)
-
-    # Final whitespace + appropriate collapse
-    t = WS_PATTERN.sub(" ", t).strip()
-    t = _collapse_marker_dups(t)
-    t = _normalize_unk(t)
-    t = WS_PATTERN.sub(" ", t).strip()
-    return t
-
-# =====================================================================
-# No punctuation variant
-# =====================================================================
-PUNCT_PATTERN = re.compile(r"[，。、「」『』？！：；（）《》〈〉——…,.!?;:()\"“”'\-]")
-KEEP_BASIC_CHARS_PATTERN = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9_\s]")
-
-DUP_PAUSE_TOK_PATTERN = re.compile(r"(PAUSE)(?:\s+\1)+")
-DUP_GRAM_TOK_PATTERN = re.compile(r"(GRAM)(?:\s+\1)+")
-DUP_FILLPAUSE_TOK_PATTERN = re.compile(r"(FILLPAUSE_(?:uh|um))(?:\s+\1)+", flags=re.IGNORECASE)
-
-def _fillpause_to_token(m: re.Match) -> str:
-    w = m.group(1).lower()
-    return f" FILLPAUSE_{w} " if w in ALLOWED_FILLPAUSES else " "
-
-def _collapse_token_dups(t: str) -> str:
-    t = DUP_PAUSE_TOK_PATTERN.sub(r"\1", t)
-    t = DUP_GRAM_TOK_PATTERN.sub(r"\1", t)
-    t = DUP_FILLPAUSE_TOK_PATTERN.sub(lambda m: m.group(1).upper(), t)
-    return t
-
-def clean_structured_chinese_no_punct(text: TextLike) -> str:
-    t = clean_structured_chinese(text)
-    if not t:
-        return ""
-
-    t = t.replace("[//]", " RETRACE ")
-    t = t.replace("[/]", " REPEAT ")
-    t = t.replace("[+ gram]", " GRAM ")
-    t = t.replace("<...>", " PAUSE ")
-    t = FILLPAUSE_PATTERN.sub(_fillpause_to_token, t)
-
-    t = PUNCT_PATTERN.sub(" ", t)
-    t = KEEP_BASIC_CHARS_PATTERN.sub(" ", t)
-    t = WS_PATTERN.sub(" ", t).strip()
-
-    t = _collapse_token_dups(t)
-    t = WS_PATTERN.sub(" ", t).strip()
-    return t
+    print_classification_report: true
+    print_confusion_matrix: true
+    print_method_summary: true
