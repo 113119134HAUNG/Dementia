@@ -17,7 +17,8 @@ common:
 
 asr:
   # choose ONE:
-  data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
+  data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/raw_vad"
+  # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
   # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge_vad"
   # (raw/raw_vad 也可：/content/NCMMSC2021_AD_Competition-dev/dataset/raw 或 raw_vad)
 
