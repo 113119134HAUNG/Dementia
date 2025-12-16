@@ -1,12 +1,14 @@
 # =====================================================================
-# config_text.yaml (single source of truth, paper-strict, converged)
+# config_text.yaml (single source of truth, paper-strict)
+# - NO python tuple tags
+# - ngram_range kept as list [a,b], code converts to tuple
 # =====================================================================
 
 common:
   seed: &seed 42
 
   split_test_size: &split_test_size 0.2
-  length_std_k: &length_std_k 1.0
+  length_std_k: &length_std_k 2.5
   min_per_class: &min_per_class 2
 
   logreg_C: &logreg_C 1.0
@@ -51,7 +53,7 @@ asr:
     log_prob_threshold: -1.0
     no_speech_threshold: 0.6
     condition_on_previous_text: true
-    vad_filter: false
+    vad_filter: true
     without_timestamps: true
 
 predictive:
@@ -83,7 +85,11 @@ text:
     - name: "TAUKADIAL"
       path: null
 
-  target_datasets: ["NCMMSC2021_AD_Competition"]
+  # 建議先把兩個都吃進來，不然你合併 predictive 等於沒用到
+  target_datasets:
+    - "NCMMSC2021_AD_Competition"
+    - "Chinese_predictive_challenge"
+
   target_labels: ["AD", "HC"]
 
   balance: true
@@ -105,22 +111,27 @@ text:
   language_filter:
     drop_languages: ["en"]
 
-  # NEW: quality filter (after cleaning)
+  # quality filter (AFTER cleaning)
+  # 這組是「不會砍爆」的預設：先救回樣本量，再看 drop reasons 微調
   quality_filter:
     enabled: true
-    min_chars: 30
-    min_han: 20
-    max_unk_ratio: 0.30
+    min_chars: 15
+    min_lex_chars: 8
+    min_han: 6
+    max_unk_ratio: 0.75
 
+  # length filter
+  # 小樣本下 mean±std 很容易亂砍，所以加 min_class_n 做保護
   length_filter:
     enabled: true
     std_k: *length_std_k
+    min_class_n: 30
 
 features:
   tfidf:
     vectorizer:
       analyzer: "char"
-      ngram_range: [2, 4]   # keep as list; code will convert to tuple
+      ngram_range: [2, 4]
       lowercase: false
       max_features: 50000
       stop_words: null
@@ -188,7 +199,6 @@ features:
     output_indices: "/content/chinese_combined/folds_indices.json"
 
     methods: ["tfidf", "bert", "glove", "gemma"]
-
     tfidf_fit_scope: "full"   # "full" | "train"
 
     batch_size: 8
