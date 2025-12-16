@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-paper/cv_features.py
+cv_features.py
 
 Feature extraction only:
 - TF-IDF
 - BERT sentence embeddings (mean / CLS / last-N-layers concat + mean)
 - GloVe/fastText-style static word embeddings (sentence embedding)
 - Gemma sentence embeddings
+
+NOTE (paper-strict):
+- YAML often loads ngram_range as a list [a, b]
+- Newer scikit-learn requires CountVectorizer.ngram_range to be a tuple (a, b)
+  -> We coerce list->tuple in TF-IDF helpers (single responsibility, no config hacks).
 """
 
 from __future__ import annotations
@@ -16,6 +21,44 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+# =========================
+# TF-IDF helpers (strict)
+# =========================
+def _coerce_ngram_range(v: Any) -> Tuple[int, int]:
+    """
+    Coerce YAML-loaded ngram_range into sklearn-compatible tuple[int,int].
+
+    Accept:
+      - (2,4)
+      - [2,4]
+      - "2,4" / "(2,4)"
+    """
+    if v is None:
+        return (1, 1)
+
+    if isinstance(v, tuple) and len(v) == 2:
+        return (int(v[0]), int(v[1]))
+
+    if isinstance(v, list) and len(v) == 2:
+        return (int(v[0]), int(v[1]))
+
+    if isinstance(v, str):
+        s = v.strip().replace("(", "").replace(")", "")
+        if "," in s:
+            a, b = s.split(",", 1)
+            return (int(a.strip()), int(b.strip()))
+
+    raise ValueError(f"Invalid ngram_range: {v!r}. Expect [a,b] or (a,b) or 'a,b'.")
+
+def _sanitize_vectorizer_cfg(vectorizer_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Make CountVectorizer params sklearn-safe, without mutating caller dict.
+    Currently only fixes ngram_range (list->tuple).
+    """
+    cfg = dict(vectorizer_cfg or {})
+    if "ngram_range" in cfg:
+        cfg["ngram_range"] = _coerce_ngram_range(cfg["ngram_range"])
+    return cfg
 
 def tfidf_features_all(
     X: Sequence[str],
@@ -25,7 +68,8 @@ def tfidf_features_all(
 ) -> np.ndarray:
     from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 
-    vect = CountVectorizer(**(vectorizer_cfg or {}))
+    vect_cfg = _sanitize_vectorizer_cfg(vectorizer_cfg)
+    vect = CountVectorizer(**(vect_cfg or {}))
     tfidf = TfidfTransformer(**(transformer_cfg or {}))
 
     counts = vect.fit_transform(X)
@@ -41,13 +85,17 @@ def tfidf_features_fold_fit(
 ) -> Tuple[np.ndarray, np.ndarray]:
     from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 
-    vect = CountVectorizer(**(vectorizer_cfg or {}))
+    vect_cfg = _sanitize_vectorizer_cfg(vectorizer_cfg)
+    vect = CountVectorizer(**(vect_cfg or {}))
     tfidf = TfidfTransformer(**(transformer_cfg or {}))
 
     Xtr = tfidf.fit_transform(vect.fit_transform(X_train)).toarray()
     Xte = tfidf.transform(vect.transform(X_test)).toarray()
     return Xtr, Xte
 
+# =========================
+# BERT / Gemma helpers
+# =========================
 def _masked_mean(last_hidden: "np.ndarray", attention_mask: "np.ndarray") -> "np.ndarray":
     # last_hidden: (B,T,H), mask: (B,T)
     mask = attention_mask.astype(np.float32)
@@ -190,6 +238,9 @@ def gemma_embeddings_all(
 
     return np.concatenate(out_list, axis=0)
 
+# =========================
+# GloVe helpers
+# =========================
 def glove_embeddings_all(
     X: Sequence[str],
     *,
