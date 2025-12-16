@@ -20,6 +20,13 @@ TSV convention note
 -------------------
 - Some TSVs encode Chinese fillers as &嗯 / &啊 / &呃 ... (NOT CHAT markers).
   We strip the leading '&' and keep the CJK char to avoid losing disfluencies.
+
+NEW (robustness)
+----------------
+- Normalize all "unintelligible" variants:
+    [聽不清楚], 【聽不清楚】 -> 【聽不清楚】
+- Collapse consecutive duplicates of 【聽不清楚】
+- Sanitize weird unicode (e.g., ﻌﻌﻌ) via a conservative allowlist
 """
 
 from __future__ import annotations
@@ -57,6 +64,40 @@ WS_PATTERN = re.compile(r"\s+")
 BRACKET_ANY_PATTERN = re.compile(r"\[[^\]]*\]")
 
 # =====================================================================
+# Unintelligible token normalization
+# =====================================================================
+UNK_TOKEN = "【聽不清楚】"
+UNK_ANY_PATTERN = re.compile(r"[\[\【]\s*聽不清楚\s*[\]\】]")
+UNK_DUP_PATTERN = re.compile(rf"(?:{re.escape(UNK_TOKEN)}\s*){{2,}}")
+
+def _normalize_unk(t: str) -> str:
+    # unify all variants to UNK_TOKEN
+    t = UNK_ANY_PATTERN.sub(UNK_TOKEN, t)
+    # collapse duplicates
+    t = UNK_DUP_PATTERN.sub(f"{UNK_TOKEN} ", t)
+    return t
+
+# =====================================================================
+# Weird unicode sanitizer (allowlist)
+#   - keeps Chinese, Latin, digits, common punctuation, and CHAT markers symbols
+# =====================================================================
+_ALLOWED_CHARS_PATTERN = re.compile(
+    r"[^\u4e00-\u9fffA-Za-z0-9\s"
+    r"\[\]\(\)<>"
+    r"&\+\-_/\\"
+    r"，。！？；：、（）「」『』《》…【】"
+    r"\.,!?;:\"“”'·]+"
+)
+
+def sanitize_weird_unicode(t: str) -> str:
+    if not t:
+        return ""
+    t = t.replace("\u00A0", " ")
+    t = _ALLOWED_CHARS_PATTERN.sub(" ", t)
+    t = WS_PATTERN.sub(" ", t).strip()
+    return t
+
+# =====================================================================
 # ASR-level cleaning (light, deterministic)
 # =====================================================================
 ZHUYIN_PATTERN = re.compile(
@@ -71,9 +112,20 @@ def clean_asr_chinese(text: TextLike) -> str:
     t = _to_str(text)
     if not t:
         return ""
-    t = t.replace("[聽不清楚]", " ")
+
+    # normalize UNK variants early
+    t = _normalize_unk(t)
+
+    # Zhuyin -> "嗯" (paper-aligned)
     t = ZHUYIN_PATTERN.sub("嗯", t)
     t = MULTI_HMM_PATTERN.sub("嗯 ", t)
+
+    # sanitize weird unicode (fixes ﻌﻌﻌ-like garbage)
+    t = sanitize_weird_unicode(t)
+
+    # keep UNK token (do NOT delete here; quality_filter will handle high-UNK cases)
+    t = _normalize_unk(t)
+
     t = WS_PATTERN.sub(" ", t).strip()
     return t
 
@@ -111,8 +163,6 @@ DROP_PLUS_ANGLE_PATTERN = re.compile(r"\+<[^>]*>")
 
 # IMPORTANT: be conservative to avoid killing lexical forms like "C++"
 # Only drop "+CODE" when it looks like a standalone annotation token:
-#   - starts with '+' AND followed by letters/digits/underscore/hyphen
-#   - bounded by whitespace or string edges
 DROP_PLUS_CODE_PATTERN = re.compile(r"(?:(?<=\s)|^)\+[A-Za-z0-9_-]+(?=(?:\s|$))")
 
 PAREN_PATTERN = re.compile(r"\([^)]*\)")
@@ -139,6 +189,9 @@ def clean_structured_chinese(text: TextLike) -> str:
         return ""
 
     t = t.replace("\u00A0", " ")
+
+    # normalize UNK variants early
+    t = _normalize_unk(t)
 
     # Speaker labels
     t = SPEAKER_EN_PATTERN.sub("", t)
@@ -185,9 +238,13 @@ def clean_structured_chinese(text: TextLike) -> str:
     # Remove &codes except &-word (we already normalized/dropped &-* above)
     t = DROP_AMP_CODES_PATTERN.sub(" ", t)
 
+    # sanitize weird unicode
+    t = sanitize_weird_unicode(t)
+
     # Final whitespace + appropriate collapse
     t = WS_PATTERN.sub(" ", t).strip()
     t = _collapse_marker_dups(t)
+    t = _normalize_unk(t)
     t = WS_PATTERN.sub(" ", t).strip()
     return t
 
