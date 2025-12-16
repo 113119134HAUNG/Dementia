@@ -266,7 +266,6 @@ def hf_login_and_download(
                 repo_id=repo_id,
                 local_dir=str(local_dir),
                 token=(token or None),
-                local_dir_use_symlinks=False,
             )
             local_paths.append(local_dir)
             print(f"[OK] {repo_id} -> {local_dir}")
