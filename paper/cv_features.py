@@ -134,7 +134,6 @@ def bert_embeddings_all(
     except Exception as e:  # noqa: BLE001
         raise ImportError("BERT evaluation requires torch + transformers installed.") from e
 
-    # Prefer embedding_strategy; fall back to pooling; default mean
     strat = (embedding_strategy or pooling or "mean").strip().lower()
     if strat not in ("mean", "cls", "last4_concat_mean"):
         raise ValueError(
@@ -151,7 +150,6 @@ def bert_embeddings_all(
     out_list: List[np.ndarray] = []
     bs = max(1, int(batch_size))
     ln = max(1, int(last_n_layers))
-
     need_hidden = (strat == "last4_concat_mean")
 
     for i in range(0, len(X), bs):
@@ -183,12 +181,9 @@ def bert_embeddings_all(
             att_np = att.detach().cpu().numpy() if att is not None else None
 
             if strat == "cls":
-                sent = last_np[:, 0, :]  # (B,H) or (B,H*ln)
+                sent = last_np[:, 0, :]
             else:
-                if att_np is None:
-                    sent = last_np.mean(axis=1)
-                else:
-                    sent = _masked_mean(last_np, att_np)
+                sent = last_np.mean(axis=1) if att_np is None else _masked_mean(last_np, att_np)
 
         out_list.append(sent.astype(np.float32))
 
@@ -240,15 +235,11 @@ def gemma_embeddings_all(
 
         with torch.no_grad():
             outputs = mdl(**enc)
-            last = outputs.last_hidden_state  # (B,T,H)
+            last = outputs.last_hidden_state
             last_np = last.detach().cpu().numpy()
             att = enc.get("attention_mask")
             att_np = att.detach().cpu().numpy() if att is not None else None
-
-            if att_np is None:
-                sent = last_np.mean(axis=1)
-            else:
-                sent = _masked_mean(last_np, att_np)
+            sent = last_np.mean(axis=1) if att_np is None else _masked_mean(last_np, att_np)
 
         out_list.append(sent.astype(np.float32))
 
@@ -280,7 +271,6 @@ def glove_embeddings_all(
     if not p.exists():
         raise FileNotFoundError(f"Embeddings file not found: {p}")
 
-    # stopwords (optional; no downloads)
     stop: set = set()
     if remove_stopwords and stopwords_lang and str(stopwords_lang).lower() == "english":
         try:
@@ -313,7 +303,7 @@ def glove_embeddings_all(
         for line in f:
             parts = line.rstrip().split()
             if len(parts) < (1 + dim):
-                continue  # also skips header like: "2000000 300"
+                continue
             w = parts[0]
             try:
                 vec = np.asarray(parts[1 : 1 + dim], dtype=np.float32)
