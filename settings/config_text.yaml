@@ -12,7 +12,8 @@ common:
   min_per_class: &min_per_class 2
 
   logreg_C: &logreg_C 1.0
-  logreg_max_iter: &logreg_max_iter 1000
+  # ↑ 提高迭代次數，降低 Gemma/高維 embedding 的收斂警告機率
+  logreg_max_iter: &logreg_max_iter 3000
   max_seq_length: &max_seq_length 512
 
 asr:
@@ -124,13 +125,17 @@ text:
       - "(越多越好|說得越多越好|说得越多越好|講得越多越好|讲得越多越好)"
       - "(你覺得|你觉得).{0,16}(在做什麼|在做什么)"
       - "^(然後呢|然后呢|還有呢|还有呢)"
+      # 追加：常見任務引導句（可選，通常很安全）
+      - "(接下來|现在|現在).{0,12}(圖畫|图片|圖片|图).{0,12}(描述|任务|任務)"
+      - "(請|麻煩).{0,10}(描述|说|說).{0,10}(這幅|这幅|這張|这张).{0,6}(圖|图|图片|圖片)"
 
   # quality filter (AFTER cleaning + prompt_filter)
+  # 因為我們移除了【上海话】這類 meta tag，這裡稍微放寬，避免把短但有效的描述砍掉
   quality_filter:
     enabled: true
     min_chars: 15
-    min_lex_chars: 8
-    min_han: 6
+    min_lex_chars: 6
+    min_han: 4
     max_unk_ratio: 0.75
 
   length_filter:
@@ -211,7 +216,7 @@ features:
 
     methods: ["tfidf", "bert", "glove", "gemma"]
 
-    # 建議：CV 時 TFIDF vocab 應只 fit train，避免 full-scope leakage
+    # CV 時 TFIDF vocab 應只 fit train，避免 full-scope leakage
     tfidf_fit_scope: "train"   # "full" | "train"
 
     batch_size: 8
