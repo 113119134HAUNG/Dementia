@@ -8,6 +8,12 @@ This file only:
 - builds/reuses fold indices
 - runs methods (tfidf/bert/glove/gemma) using same folds
 - saves metrics JSON
+
+IMPORTANT:
+- YAML is the single source of truth.
+- This script will NOT modify YAML.
+- If YAML requests CUDA but the runtime cannot use CUDA, we only fallback for this run
+  (to avoid crashing). YAML stays unchanged.
 """
 
 from __future__ import annotations
@@ -34,6 +40,40 @@ from paper.cv_eval import (
     evaluate_with_precomputed_folds,
     evaluate_tfidf_trainonly,
 )
+
+
+def _maybe_fallback_device(device_from_yaml: str, *, method: str) -> str:
+    """
+    Respect YAML. Do NOT modify YAML.
+    Only fallback at runtime if YAML requests CUDA but CUDA is not usable.
+    """
+    dev = str(device_from_yaml).strip()
+    if not dev:
+        return "cpu"
+
+    dev_l = dev.lower()
+    if not dev_l.startswith("cuda"):
+        return dev  # CPU or other explicit device string
+
+    # YAML wants CUDA -> check runtime support
+    try:
+        import torch  # type: ignore
+    except Exception:
+        print(f"[WARN] {method}: YAML device='{dev}' but torch is not installed -> use 'cpu' for this run (YAML unchanged)")
+        return "cpu"
+
+    # torch exists but CUDA may be unavailable (CPU-only build or no GPU)
+    try:
+        cuda_ok = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_ok = False
+
+    if not cuda_ok:
+        print(f"[WARN] {method}: YAML device='{dev}' but CUDA is unavailable -> use 'cpu' for this run (YAML unchanged)")
+        return "cpu"
+
+    return dev  # CUDA is usable, respect YAML exactly
+
 
 def run_evaluate_cv(
     config_path: Optional[str] = None,
@@ -174,7 +214,8 @@ def run_evaluate_cv(
             model_name = str(require(bert_cfg, "model_name", where="features.bert"))
             pooling = str(bert_cfg.get("pooling", "mean"))
             max_seq_length = int(require(bert_cfg, "max_seq_length", where="features.bert"))
-            device = str(require(bert_cfg, "device", where="features.bert"))
+            device_yaml = str(require(bert_cfg, "device", where="features.bert"))
+            device = _maybe_fallback_device(device_yaml, method="bert")
             logreg_cfg = get_dict(bert_cfg, "logreg", where="features.bert")
 
             X_all = bert_embeddings_all(
@@ -245,7 +286,8 @@ def run_evaluate_cv(
             model_name = str(require(gemma_cfg, "model_name", where="features.gemma"))
             pooling = str(gemma_cfg.get("pooling", "mean"))
             max_seq_length = int(require(gemma_cfg, "max_seq_length", where="features.gemma"))
-            device = str(require(gemma_cfg, "device", where="features.gemma"))
+            device_yaml = str(require(gemma_cfg, "device", where="features.gemma"))
+            device = _maybe_fallback_device(device_yaml, method="gemma")
             logreg_cfg = get_dict(gemma_cfg, "logreg", where="features.gemma")
 
             X_all = gemma_embeddings_all(
@@ -287,12 +329,14 @@ def run_evaluate_cv(
     print(f"\n[INFO] Saved CV metrics to: {metrics_output}")
     return str(metrics_output)
 
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Paper-style K-fold CV evaluator (YAML-driven).")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
     p.add_argument("--methods", nargs="+", default=None, help="Override methods: tfidf bert glove gemma")
     p.add_argument("--reuse-folds", action="store_true", help="Reuse existing folds indices JSON.")
     return p
+
 
 def cli_main() -> None:
     args = build_arg_parser().parse_args()
@@ -301,6 +345,7 @@ def cli_main() -> None:
         methods_override=None if args.methods is None else [str(x).strip() for x in args.methods],
         reuse_folds=bool(args.reuse_folds),
     )
+
 
 if __name__ == "__main__":
     cli_main()
