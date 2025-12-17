@@ -368,13 +368,21 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     if not isinstance(pf_patterns, list):
         pf_patterns = []
 
+    # ---- NEW: echo-only patterns (apply with mode="any" after leading) ----
+    pf_echo_patterns = pf_cfg.get("echo_patterns", []) or []
+    if not isinstance(pf_echo_patterns, list):
+        pf_echo_patterns = []
+    pf_echo_enabled = bool(pf_cfg.get("echo_enabled", True)) and (len(pf_echo_patterns) > 0)
+
     if pf_enabled and "Text_interviewer_participant" in df.columns:
         if pf_apply_datasets and "Dataset" in df.columns:
             apply_set = {str(x) for x in pf_apply_datasets}
             mask = df["Dataset"].astype(str).isin(apply_set)
             if mask.any():
                 before = df.loc[mask, "Text_interviewer_participant"].copy()
-                df.loc[mask, "Text_interviewer_participant"] = df.loc[mask, "Text_interviewer_participant"].apply(
+
+                # Pass 1: leading (safe)
+                after_leading = before.apply(
                     lambda x: prompt_filter_text(
                         x,
                         enabled=True,
@@ -384,11 +392,29 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
                         min_keep_chars=pf_min_keep,
                     )
                 )
-                after = df.loc[mask, "Text_interviewer_participant"]
-                _log_prompt_filter_stats(before, after, scope_name="dataset_masked")
+                _log_prompt_filter_stats(before, after_leading, scope_name="prompt_leading(dataset_masked)")
+
+                # Pass 2: any, echo-only (remove initial_prompt echoes anywhere)
+                if pf_echo_enabled:
+                    after_echo = after_leading.apply(
+                        lambda x: prompt_filter_text(
+                            x,
+                            enabled=True,
+                            patterns=pf_echo_patterns,
+                            mode="any",
+                            max_leading_sentences=0,   # unused in "any"
+                            min_keep_chars=pf_min_keep,
+                        )
+                    )
+                    _log_prompt_filter_stats(after_leading, after_echo, scope_name="prompt_echo_any(dataset_masked)")
+                else:
+                    after_echo = after_leading
+
+                df.loc[mask, "Text_interviewer_participant"] = after_echo
         else:
             before = df["Text_interviewer_participant"].copy()
-            df["Text_interviewer_participant"] = df["Text_interviewer_participant"].apply(
+
+            after_leading = before.apply(
                 lambda x: prompt_filter_text(
                     x,
                     enabled=True,
@@ -398,8 +424,24 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
                     min_keep_chars=pf_min_keep,
                 )
             )
-            after = df["Text_interviewer_participant"]
-            _log_prompt_filter_stats(before, after, scope_name="all_rows")
+            _log_prompt_filter_stats(before, after_leading, scope_name="prompt_leading(all_rows)")
+
+            if pf_echo_enabled:
+                after_echo = after_leading.apply(
+                    lambda x: prompt_filter_text(
+                        x,
+                        enabled=True,
+                        patterns=pf_echo_patterns,
+                        mode="any",
+                        max_leading_sentences=0,
+                        min_keep_chars=pf_min_keep,
+                    )
+                )
+                _log_prompt_filter_stats(after_leading, after_echo, scope_name="prompt_echo_any(all_rows)")
+            else:
+                after_echo = after_leading
+
+            df["Text_interviewer_participant"] = after_echo
 
     # (C) quality filter
     qf_cfg = text_cfg.get("quality_filter", {})
