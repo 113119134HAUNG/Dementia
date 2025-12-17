@@ -1,182 +1,153 @@
 # -*- coding: utf-8 -*-
 """
-preprocess/preprocess_chinese.py (paper-strict, converged, CV-ready)
+preprocess_chinese.py (paper-strict)
 
-Pipeline:
-1) ASR CSV -> NCMMSC JSONL (optional; controlled by flags)
-2) Merge JSONLs using ONLY text.corpora (skip missing paths)
-3-12) Done in preprocess/chinese_steps.py
+Step 1-2:
+- Load YAML once.
+- Load corpora JSONL listed in text.corpora (only those in text.target_datasets).
+- Merge into a single combined JSONL (deterministic order).
+- Call chinese_steps.load_and_process_chinese (Step 3-12).
+- Save cleaned.jsonl.
+
+This file should NOT do any cleaning itself.
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from preprocess.collection import JSONLCombiner
-from tools.config_utils import get_asr_config, get_text_config, load_text_config
+from preprocess.chinese_steps import load_and_process_chinese, save_cleaned_jsonl
+from tools.config_utils import load_text_config
 
-# --- support both: `python -m preprocess.preprocess_chinese` and direct run ---
-try:
-    from .chinese_steps import (
-        _get_list,
-        _require,
-        _resolve_path,
-        load_and_process_chinese,
-        save_cleaned_jsonl,
-    )
-except Exception:  # pragma: no cover
-    from chinese_steps import (  # type: ignore
-        _get_list,
-        _require,
-        _resolve_path,
-        load_and_process_chinese,
-        save_cleaned_jsonl,
-    )
+def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
+    if key not in cfg:
+        prefix = f"{where}." if where else ""
+        raise KeyError(f"Config missing required key: {prefix}{key}")
+    return cfg[key]
 
-# =====================================================================
-# Step 1: ASR CSV -> NCMMSC JSONL
-# =====================================================================
-def csv_to_ncmmsc_jsonl(csv_path: str, jsonl_path: str, *, dataset_name: str) -> str:
-    csv_path_p = Path(csv_path)
-    jsonl_path_p = Path(jsonl_path)
+def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, Any]:
+    v = _require(cfg, key, where=where)
+    if not isinstance(v, dict):
+        prefix = f"{where}." if where else ""
+        raise ValueError(f"{prefix}{key} must be a dict.")
+    return v
 
-    if not csv_path_p.exists():
-        raise FileNotFoundError(f"ASR CSV not found: {csv_path_p} (run Music_to_text.asr_ncmmsc first)")
+def _get_list(cfg: Dict[str, Any], key: str, *, where: str = "") -> List[Any]:
+    v = _require(cfg, key, where=where)
+    if not isinstance(v, list):
+        prefix = f"{where}." if where else ""
+        raise ValueError(f"{prefix}{key} must be a list.")
+    return v
 
-    df = pd.read_csv(csv_path_p, encoding="utf-8-sig")
+def _normalize_schema(df: pd.DataFrame, *, dataset_name: str) -> pd.DataFrame:
+    out = df.copy()
 
-    for col in ("id", "label", "transcript"):
-        if col not in df.columns:
-            raise ValueError(f"ASR CSV missing required column: {col} (paper-strict)")
+    # Dataset
+    if "Dataset" not in out.columns:
+        out["Dataset"] = dataset_name
+    else:
+        out["Dataset"] = out["Dataset"].astype(str).fillna("").replace("", dataset_name)
 
-    out_df = pd.DataFrame(
-        {
-            "ID": df["id"].astype(str),
-            "Diagnosis": df["label"].astype(str),
-            "Text_interviewer_participant": df["transcript"].fillna("").astype(str),
-            "Dataset": str(dataset_name),
-            "Languages": "zh",
-        }
-    )
+    # ID
+    if "ID" not in out.columns and "id" in out.columns:
+        out = out.rename(columns={"id": "ID"})
+    if "ID" not in out.columns:
+        raise ValueError(f"[{dataset_name}] Missing ID column (expected 'ID' or 'id').")
+    out["ID"] = out["ID"].astype(str).str.strip()
 
-    jsonl_path_p.parent.mkdir(parents=True, exist_ok=True)
-    out_df.to_json(jsonl_path_p, orient="records", lines=True, force_ascii=False)
-    print(f"[INFO] Saved NCMMSC JSONL to: {jsonl_path_p} (n={len(out_df)})")
-    return str(jsonl_path_p)
+    # Diagnosis
+    if "Diagnosis" not in out.columns and "label" in out.columns:
+        out = out.rename(columns={"label": "Diagnosis"})
+    if "Diagnosis" not in out.columns:
+        raise ValueError(f"[{dataset_name}] Missing Diagnosis column (expected 'Diagnosis' or 'label').")
+    out["Diagnosis"] = out["Diagnosis"].astype(str).str.strip()
 
-# =====================================================================
-# Step 2: Merge JSONLs (only existing, ONLY text.corpora)
-# =====================================================================
-def combine_jsonls(*, corpora: List[Dict[str, Any]], output_dir: str, merged_name: str) -> str:
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Text
+    if "Text_interviewer_participant" not in out.columns and "transcript" in out.columns:
+        out = out.rename(columns={"transcript": "Text_interviewer_participant"})
+    if "Text_interviewer_participant" not in out.columns:
+        raise ValueError(f"[{dataset_name}] Missing text column (expected 'Text_interviewer_participant' or 'transcript').")
+    out["Text_interviewer_participant"] = out["Text_interviewer_participant"].fillna("").astype(str)
 
-    input_files: List[str] = []
+    # Languages (optional)
+    if "Languages" not in out.columns:
+        out["Languages"] = "zh"
+    else:
+        out["Languages"] = out["Languages"].fillna("").astype(str)
+        out.loc[out["Languages"].str.strip() == "", "Languages"] = "zh"
+
+    # Deterministic row order
+    out = out.sort_values(by=["Dataset", "ID"], kind="mergesort").reset_index(drop=True)
+    return out
+
+def merge_corpora_to_jsonl(*, text_cfg: Dict[str, Any]) -> str:
+    output_dir = Path(str(_require(text_cfg, "output_dir", where="text"))).expanduser()
+    combined_name = str(_require(text_cfg, "combined_name", where="text")).strip()
+    combined_path = output_dir / combined_name
+
+    corpora = _get_list(text_cfg, "corpora", where="text")
+    target_datasets = text_cfg.get("target_datasets", None)
+    target_set = None
+    if isinstance(target_datasets, list) and target_datasets:
+        target_set = {str(x).strip() for x in target_datasets if str(x).strip()}
+
+    frames: List[pd.DataFrame] = []
     for c in corpora:
         if not isinstance(c, dict):
-            raise ValueError("text.corpora entries must be dicts with keys: name, path.")
-        if "name" not in c or "path" not in c:
-            raise ValueError("Each text.corpora entry must contain keys: name, path.")
-
+            continue
+        name = str(c.get("name", "")).strip()
         path = c.get("path", None)
+
+        if not name:
+            continue
+        if target_set is not None and name not in target_set:
+            continue
         if path is None:
             continue
 
-        p = Path(str(path))
+        p = Path(str(path)).expanduser()
         if not p.exists():
-            print(f"[WARN] Missing JSONL, skip: {p} (name={c.get('name')})")
-            continue
+            raise FileNotFoundError(f"[text.corpora] File not found: {p} (dataset={name})")
 
-        input_files.append(str(p))
+        df = pd.read_json(p, lines=True)
+        df = _normalize_schema(df, dataset_name=name)
+        frames.append(df)
 
-    if not input_files:
-        raise FileNotFoundError("No input JSONL files found for merging (check text.corpora paths).")
+    if not frames:
+        raise FileNotFoundError("No corpora loaded. Check text.corpora paths and text.target_datasets.")
 
-    print("[INFO] Combining JSONL files:")
-    for f in input_files:
-        print(f"  - {f}")
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.sort_values(by=["Dataset", "ID"], kind="mergesort").reset_index(drop=True)
 
-    combiner = JSONLCombiner(input_files, str(out_dir), merged_name)
-    combiner.combine()
+    combined_path.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_json(combined_path, orient="records", lines=True, force_ascii=False)
+    print(f"[INFO] Saved combined JSONL to: {combined_path} (n={len(merged)})")
+    return str(combined_path)
 
-    merged_path = out_dir / merged_name
-    print(f"[INFO] Combined JSONL saved to: {merged_path}")
-    return str(merged_path)
-
-# =====================================================================
-# Orchestrator
-# =====================================================================
-def run_chinese_preprocessing(
-    config_path: Optional[str] = None,
-    *,
-    skip_asr_jsonl: bool = False,
-    force_asr_jsonl: bool = False,
-) -> Tuple[str, str]:
+def run_preprocess_chinese(config_path: Optional[str] = None) -> str:
     cfg = load_text_config(config_path)
-    asr_cfg = get_asr_config(cfg=cfg)
-    text_cfg = get_text_config(cfg=cfg)
+    text_cfg = _get_dict(cfg, "text", where="root")
 
-    ncmmsc_jsonl = str(_require(text_cfg, "ncmmsc_jsonl", where="text"))
-    output_dir = str(_require(text_cfg, "output_dir", where="text"))
-    merged_name = str(_require(text_cfg, "combined_name", where="text"))
-    cleaned_jsonl = str(text_cfg.get("cleaned_jsonl") or (Path(output_dir) / "cleaned.jsonl"))
+    combined_jsonl = merge_corpora_to_jsonl(text_cfg=text_cfg)
 
-    corpora = _get_list(text_cfg, "corpora", where="text")
+    cleaned_jsonl = str(_require(text_cfg, "cleaned_jsonl", where="text"))
+    df_clean = load_and_process_chinese(combined_jsonl, text_cfg=text_cfg)
+    out_path = save_cleaned_jsonl(df_clean, output_path=cleaned_jsonl)
+    return out_path
 
-    # paper-strict: corpora must contain an entry whose path == text.ncmmsc_jsonl
-    ncmmsc_path = _resolve_path(ncmmsc_jsonl)
-    ncmmsc_name = None
-    for c in corpora:
-        if isinstance(c, dict) and c.get("path") is not None:
-            if _resolve_path(c["path"]) == ncmmsc_path:
-                ncmmsc_name = c.get("name")
-                break
-    if not ncmmsc_name:
-        raise ValueError("paper-strict: text.corpora must include NCMMSC entry matching text.ncmmsc_jsonl exactly.")
-
-    # Step 1: ASR CSV -> NCMMSC JSONL (optional)
-    ncmmsc_jsonl_p = Path(ncmmsc_jsonl)
-    if skip_asr_jsonl:
-        print(f"[INFO] Skip ASR CSV->JSONL. Using existing (if any): {ncmmsc_jsonl_p}")
-    else:
-        if ncmmsc_jsonl_p.exists() and not force_asr_jsonl:
-            print(f"[INFO] NCMMSC JSONL exists, skip rebuild: {ncmmsc_jsonl_p} (use --force-asr-jsonl to rebuild)")
-        else:
-            asr_csv = str(_require(asr_cfg, "output_csv", where="asr"))
-            csv_to_ncmmsc_jsonl(asr_csv, ncmmsc_jsonl, dataset_name=str(ncmmsc_name))
-
-    # Step 2: merge JSONLs
-    merged_path = combine_jsonls(corpora=corpora, output_dir=output_dir, merged_name=merged_name)
-
-    # Step 3-11: process (in chinese_steps.py)
-    df_clean = load_and_process_chinese(merged_path, text_cfg)
-
-    # Step 12: save cleaned.jsonl
-    cleaned_path = save_cleaned_jsonl(df_clean, output_path=cleaned_jsonl)
-
-    return str(merged_path), str(cleaned_path)
-
-# =====================================================================
-# CLI
-# =====================================================================
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Preprocess Chinese AD datasets (merge/clean) - paper-strict (no split).")
+    p = argparse.ArgumentParser(description="Merge Chinese corpora and run paper-strict text preprocessing (YAML-driven).")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
-    p.add_argument("--skip-asr-jsonl", action="store_true", help="Skip ASR CSV -> NCMMSC JSONL conversion.")
-    p.add_argument("--force-asr-jsonl", action="store_true", help="Force rebuild NCMMSC JSONL from ASR CSV.")
     return p
 
 def cli_main() -> None:
     args = build_arg_parser().parse_args()
-    run_chinese_preprocessing(
-        config_path=args.config,
-        skip_asr_jsonl=bool(args.skip_asr_jsonl),
-        force_asr_jsonl=bool(args.force_asr_jsonl),
-    )
+    out = run_preprocess_chinese(config_path=args.config)
+    print(f"[INFO] DONE: {out}")
 
 if __name__ == "__main__":
     cli_main()
