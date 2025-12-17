@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-tools/text_cleaning.py
+text_cleaning.py
 
 Text cleaning utilities (paper-aligned, strict + minimal).
 
 NEW in this revision:
+- Prompt filter leading mode is truly "drop consecutive prompts at the start only"
+  (high precision; once non-prompt encountered, stop dropping).
 - Prompt filter sentence splitter more robust for ASR that lacks 。！？:
   include ， 、 , as weak sentence boundaries to avoid "whole paragraph becomes one sentence" over-drop.
 - Remove dialect/meta tags like 【上海话】/【上海話】/【方言】 to avoid shortcut features.
@@ -15,7 +17,7 @@ from __future__ import annotations
 import math
 import numbers
 import re
-from typing import Union
+from typing import List, Optional, Union
 
 TextLike = Union[str, float]
 
@@ -33,7 +35,6 @@ def _is_missing(x: TextLike) -> bool:
         except (TypeError, ValueError):
             return False
     return False
-
 
 def _to_str(x: TextLike) -> str:
     return "" if _is_missing(x) else str(x)
@@ -66,7 +67,6 @@ _ALLOWED_CHARS_PATTERN = re.compile(
     r"，。！？；：、（）「」『』《》…【】"
     r"\.,!?;:\"“”'·]+"
 )
-
 
 def sanitize_weird_unicode(t: str) -> str:
     if not t:
@@ -205,7 +205,7 @@ def clean_structured_chinese(text: TextLike) -> str:
     # Remove &codes except &-word (we already normalized/dropped &-* above)
     t = DROP_AMP_CODES_PATTERN.sub(" ", t)
 
-    # Remove dialect/meta tags
+    # Remove dialect/meta tags (e.g., 【上海话】/【方言】)
     t = DIALECT_TAG_PATTERN.sub(" ", t)
 
     # sanitize weird unicode
@@ -228,15 +228,16 @@ def prompt_filter_text(
     text: TextLike,
     *,
     enabled: bool = True,
-    patterns: list[str] | None = None,
-    mode: str = "leading",              # leading | any
+    patterns: Optional[List[str]] = None,
+    mode: str = "leading",  # leading | any
     max_leading_sentences: int = 8,
     min_keep_chars: int = 20,
 ) -> str:
     """
     Remove interviewer prompts from ASR-mixed transcripts.
 
-    - mode="leading": drop consecutive prompt-like sentences at start only (safe default)
+    - mode="leading": drop consecutive prompt-like sentences at start only (HIGH precision)
+      (once a non-prompt sentence is found, stop dropping)
     - mode="any": drop any sentence that matches (riskier)
 
     If output becomes too short, returns "" (let quality_filter drop it).
@@ -250,7 +251,7 @@ def prompt_filter_text(
         return ""
 
     pats = patterns or []
-    regs: list[re.Pattern] = []
+    regs: List[re.Pattern] = []
     for p in pats:
         try:
             regs.append(re.compile(p))
@@ -271,14 +272,18 @@ def prompt_filter_text(
     if mode_l == "any":
         kept = [s for s in parts if not _is_prompt_sent(s)]
     else:
-        kept: list[str] = []
+        # HIGH precision leading: only drop consecutive prompt-like sentences at the very beginning
+        kept: List[str] = []
         dropped = 0
         lim = max(0, int(max_leading_sentences))
+
+        still_leading = True
         for s in parts:
-            if dropped < lim and _is_prompt_sent(s):
+            if still_leading and dropped < lim and _is_prompt_sent(s):
                 dropped += 1
                 continue
             kept.append(s)
+            still_leading = False
 
     out = " ".join(kept).strip()
     out = WS_PATTERN.sub(" ", out).strip()
