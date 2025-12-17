@@ -16,6 +16,10 @@ NOTE (paper-strict):
 Back-compat:
 - evaluate_cv in some repos passes `pooling=` into bert_embeddings_all().
   -> We accept pooling as an alias of embedding_strategy.
+
+Runtime robustness (NO YAML mutation):
+- If device="cuda" is requested but CUDA is not actually available (CPU-only torch / no GPU),
+  we fallback to CPU for THIS RUN ONLY to avoid crashing.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+
 
 # =========================
 # TF-IDF helpers (strict)
@@ -54,6 +59,7 @@ def _coerce_ngram_range(v: Any) -> Tuple[int, int]:
 
     raise ValueError(f"Invalid ngram_range: {v!r}. Expect [a,b] or (a,b) or 'a,b'.")
 
+
 def _sanitize_vectorizer_cfg(vectorizer_cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Make CountVectorizer params sklearn-safe, without mutating caller dict.
@@ -63,6 +69,7 @@ def _sanitize_vectorizer_cfg(vectorizer_cfg: Dict[str, Any]) -> Dict[str, Any]:
     if "ngram_range" in cfg:
         cfg["ngram_range"] = _coerce_ngram_range(cfg["ngram_range"])
     return cfg
+
 
 def tfidf_features_all(
     X: Sequence[str],
@@ -79,6 +86,7 @@ def tfidf_features_all(
     counts = vect.fit_transform(X)
     mat = tfidf.fit_transform(counts)
     return mat.toarray()
+
 
 def tfidf_features_fold_fit(
     X_train: Sequence[str],
@@ -97,6 +105,39 @@ def tfidf_features_fold_fit(
     Xte = tfidf.transform(vect.transform(X_test)).toarray()
     return Xtr, Xte
 
+
+# =========================
+# Torch device helpers
+# =========================
+def _resolve_torch_device(device: str, *, method: str) -> "Any":
+    """
+    Return a torch.device. If CUDA requested but unavailable, fallback to CPU.
+    Does NOT modify YAML; runtime-only safety.
+    """
+    import torch  # type: ignore
+
+    dev = (device or "").strip()
+    if not dev:
+        return torch.device("cpu")
+
+    dev_l = dev.lower()
+    if not dev_l.startswith("cuda"):
+        return torch.device(dev_l)
+
+    # CUDA requested -> check availability
+    ok = False
+    try:
+        ok = bool(torch.cuda.is_available())
+    except Exception:
+        ok = False
+
+    if not ok:
+        print(f"[WARN] {method}: device='{dev}' requested but CUDA unavailable -> using CPU for this run (YAML unchanged)")
+        return torch.device("cpu")
+
+    return torch.device(dev)
+
+
 # =========================
 # BERT / Gemma helpers
 # =========================
@@ -108,6 +149,7 @@ def _masked_mean(last_hidden: "np.ndarray", attention_mask: "np.ndarray") -> "np
     denom = mask.sum(axis=1)
     denom = np.clip(denom, 1e-6, None)
     return summed / denom
+
 
 def bert_embeddings_all(
     X: Sequence[str],
@@ -129,23 +171,27 @@ def bert_embeddings_all(
       - "last4_concat_mean" : concat last-N layers -> masked mean
     """
     try:
-        import torch
-        from transformers import AutoTokenizer, AutoModel
+        import torch  # type: ignore
+        from transformers import AutoTokenizer, AutoModel  # type: ignore
     except Exception as e:  # noqa: BLE001
         raise ImportError("BERT evaluation requires torch + transformers installed.") from e
 
     strat = (embedding_strategy or pooling or "mean").strip().lower()
     if strat not in ("mean", "cls", "last4_concat_mean"):
-        raise ValueError(
-            "features.bert.embedding_strategy/pooling must be one of: mean | cls | last4_concat_mean"
-        )
+        raise ValueError("features.bert.embedding_strategy/pooling must be one of: mean | cls | last4_concat_mean")
 
     tok = AutoTokenizer.from_pretrained(model_name)
     mdl = AutoModel.from_pretrained(model_name)
     mdl.eval()
 
-    dev = torch.device(device)
-    mdl.to(dev)
+    dev = _resolve_torch_device(device, method="bert")
+    try:
+        mdl.to(dev)
+    except Exception as e:
+        # extra safety: even if user passed cuda, some torch builds throw on .to('cuda')
+        print(f"[WARN] bert: failed to move model to {dev} -> fallback to CPU for this run (YAML unchanged)")
+        dev = torch.device("cpu")
+        mdl.to(dev)
 
     out_list: List[np.ndarray] = []
     bs = max(1, int(batch_size))
@@ -166,14 +212,14 @@ def bert_embeddings_all(
 
         with torch.no_grad():
             if need_hidden:
-                outputs = mdl(**enc, output_hidden_states=True)
+                outputs = mdl(**enc, output_hidden_states=True, return_dict=True)
                 hs = outputs.hidden_states  # tuple: (emb, l1, ..., lL)
                 if hs is None or len(hs) < (ln + 1):
                     raise ValueError("BERT did not return enough hidden_states for last4_concat_mean.")
                 lastn = torch.cat(hs[-ln:], dim=-1)  # (B,T,H*ln)
                 last_np = lastn.detach().cpu().numpy()
             else:
-                outputs = mdl(**enc)
+                outputs = mdl(**enc, return_dict=True)
                 last = outputs.last_hidden_state  # (B,T,H)
                 last_np = last.detach().cpu().numpy()
 
@@ -189,6 +235,7 @@ def bert_embeddings_all(
 
     return np.concatenate(out_list, axis=0)
 
+
 def gemma_embeddings_all(
     X: Sequence[str],
     *,
@@ -198,9 +245,13 @@ def gemma_embeddings_all(
     batch_size: int,
     pooling: str = "mean",
 ) -> np.ndarray:
+    """
+    Gemma sentence embeddings via masked mean on last_hidden_state.
+    (Paper-aligned: pooling='mean' only)
+    """
     try:
-        import torch
-        from transformers import AutoTokenizer, AutoModel
+        import torch  # type: ignore
+        from transformers import AutoTokenizer, AutoModel  # type: ignore
     except Exception as e:  # noqa: BLE001
         raise ImportError("Gemma evaluation requires torch + transformers installed.") from e
 
@@ -210,13 +261,19 @@ def gemma_embeddings_all(
 
     tok = AutoTokenizer.from_pretrained(model_name)
     if tok.pad_token is None:
+        # decoder-only models sometimes lack pad_token; align to eos_token
         tok.pad_token = tok.eos_token
 
     mdl = AutoModel.from_pretrained(model_name)
     mdl.eval()
 
-    dev = torch.device(device)
-    mdl.to(dev)
+    dev = _resolve_torch_device(device, method="gemma")
+    try:
+        mdl.to(dev)
+    except Exception:
+        print(f"[WARN] gemma: failed to move model to {dev} -> fallback to CPU for this run (YAML unchanged)")
+        dev = torch.device("cpu")
+        mdl.to(dev)
 
     out_list: List[np.ndarray] = []
     bs = max(1, int(batch_size))
@@ -234,8 +291,8 @@ def gemma_embeddings_all(
         enc = {k: v.to(dev) for k, v in enc.items()}
 
         with torch.no_grad():
-            outputs = mdl(**enc)
-            last = outputs.last_hidden_state
+            outputs = mdl(**enc, return_dict=True)
+            last = outputs.last_hidden_state  # (B,T,H)
             last_np = last.detach().cpu().numpy()
             att = enc.get("attention_mask")
             att_np = att.detach().cpu().numpy() if att is not None else None
@@ -244,6 +301,7 @@ def gemma_embeddings_all(
         out_list.append(sent.astype(np.float32))
 
     return np.concatenate(out_list, axis=0)
+
 
 # =========================
 # GloVe helpers
