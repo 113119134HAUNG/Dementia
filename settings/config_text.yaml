@@ -21,11 +21,12 @@ asr:
   # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/raw"
   # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/raw_vad"
   # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
-  
-  # output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
+
   output_csv: "/content/NCMMSC2021_AD_Competition-dev/ncmmsc_merged_asr_transcripts.csv"
   model_size: "large-v3"
-  device: "cuda"
+
+  # IMPORTANT: avoid crash on CPU runtime; code should resolve auto->cuda/cpu
+  device: "auto"
   compute_type: "float16"
 
   initial_prompt: |-
@@ -133,16 +134,15 @@ text:
 
     patterns:
       - "^[\\s　]*(好|那|那我們|那我们|現在|现在|接下來|接下来|接著|接着|等一下|請|麻煩|麻烦)[，,、\\s　]{0,2}.{0,12}(你|您)[\\s　]{0,2}.{0,10}(描述|說|说|講|讲|告訴我|告诉我|講講|讲讲|說說|说说)"
-      - "^[\\s　]*(請|麻煩|麻烦)[，,、\\s　]{0,2}.{0,12}(把|再把|盡量|尽量)[\\s　]{0,2}.{0,12}(你|您)?[\\s　]{0,2}.{0,10}(看到|看見|看见)[\\s　]{0,2}.{0,12}(告訴我|告诉我|說|说|講|讲|描述)"
+      - "^[\\s　]*(請|麻煩|麻烦)[，,、\\s　]{0,2}.{0,12}(把|再把|盡量|尽量)[\\s　]{0,2}.{0,12}(你|您)?[\\s　]{0,2}.{0,10}(看到|看見|看见)[\\s　]{0,2}.{0,12}(告訴我|告诉我|說|say|講|讲|描述)"
       - "^[\\s　]*(我們|咱們|咱们)[，,、\\s　]{0,2}.{0,12}(來看|来看|看一下|看一看|看下)[\\s　]{0,2}.{0,12}(這張|这张|這個|这个).{0,6}(圖|图|圖片|图片|畫|画)"
       - "^[\\s　]*(你|您)[，,、\\s　]{0,2}.{0,10}(看到|看見|看见)[\\s　]{0,2}.{0,12}(什麼|什么)[?？]?$"
       - "^[\\s　]*(他們|他们)[，,、\\s　]{0,2}.{0,12}(在做什麼|在做什么)[?？]?$"
-      - "^[\\s　]*(越多越好|說得越多越好|说得越多越好|講得越多越好|讲得越多越好)[。！？!?]?$"
+      - "^[\\s　]*(越多越好|說得越多越好|say得越多越好|講得越多越好|讲得越多越好)[。！？!?]?$"
       - "^[\\s　]*(然後呢|然后呢|還有呢|还有呢)[?？]?$"
 
     echo_enabled: true
     echo_patterns:
-      # ===== echo_patterns =====
       - "(請以繁體中文逐字轉寫|请以繁体中文逐字转写|完整逐字轉寫|完整逐字转写)"
       - "(不要翻譯|不要翻译|不要潤飾|不要润饰|不要做任何摘要|不要做摘要)"
       - "(保留語助詞|保留语助词|猶豫聲|犹豫声|重複|重复|自我修正|中斷|中断)"
@@ -150,14 +150,12 @@ text:
       - "(AD/HC/MCI\\s*保留大寫|AD\\s*/\\s*HC\\s*/\\s*MCI\\s*保留大寫|保留大写)"
       - "(常見詞：|常见词：|失智症|阿茲海默症|阿尔茨海默|認知功能|记忆力|量表|測驗|受試者|照顧者)"
 
-      # ===== 把 initial_prompt 每一行都單獨抓 =====
       - "(請以繁體中文逐字轉寫（不要翻譯/潤飾/摘要）|请以繁体中文逐字转写（不要翻译/润饰/摘要）)"
       - "(保留語助詞與猶豫聲、重複、自我修正與中斷|保留语助词与犹豫声、重复、自我修正与中断)"
       - "(聽不清楚以【聽不清楚】標示；AD/HC/MCI\\s*保留大寫|听不清楚以【聽不清楚】标示；AD/HC/MCI\\s*保留大写)"
       - "(常見詞：失智症、阿茲海默症、認知功能、記憶力、量表、測驗、醫師、受試者、照顧者|常见词：失智症、阿尔茨海默症、认知功能、记忆力、量表、测验、医师、受试者、照顾者)"
 
-      # ===== 訪談者短句/追問 =====
-      - "^[\\s　]*(這|这)(個|句|段).{0,10}(也)?(要)?(說|说|講|讲)(嗎|吗)[?？]?$"
+      - "^[\\s　]*(這|这)(個|句|段).{0,10}(也)?(要)?(說|say|講|讲)(嗎|吗)[?？]?$"
       - "^[\\s　]*(再|再說|再说).{0,10}(一次|一遍|一下)[?？]?$"
       - "^[\\s　]*(你|您)?[\\s　]*(還有|还有|然後|然后)(呢)?[?？]?$"
       - "^[\\s　]*(嗯|呃|啊)?[\\s　]*(這個|这个|那個|那个)(呢)?[?？]?$"
@@ -200,7 +198,7 @@ features:
     model_name: "/content/models/bert-base-chinese"
     pooling: "mean"
     max_seq_length: *max_seq_length
-    device: "cuda"
+    device: "auto"
     logreg:
       C: *logreg_C
       class_weight: "balanced"
@@ -228,7 +226,7 @@ features:
     model_name: "/content/models/google__gemma-2b"
     pooling: "mean"
     max_seq_length: *max_seq_length
-    device: "cuda"
+    device: "auto"
     logreg:
       C: *logreg_C
       class_weight: "balanced"
