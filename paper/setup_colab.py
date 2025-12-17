@@ -286,7 +286,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--install-core", action="store_true", help="Also install/upgrade numpy+pandas (may conflict).")
     p.add_argument("--install-torch", action="store_true", help="Also install/upgrade torch (may break torchvision).")
 
-    p.add_argument("--gdrive-file-id", type=str, default="1NPE7aLlSqlKdOJE4l5HTN06DxKP73a-O")
+    p.add_argument("--gdrive-file-id", type=str, default="1Aget4vCuN5KS5Quq2zoem92J4y8dlkQw")
     p.add_argument("--zip-path", type=str, default="/content/NCMMSC2021_AD_Competition-dev.zip")
     p.add_argument("--unzip-dir", type=str, default="/content")
 
