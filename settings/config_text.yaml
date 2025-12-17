@@ -149,6 +149,7 @@ text:
       - "(不要自行更改語序|不要自行更改语序|補上沒聽到的字|补上没听到的字)"
       - "(請保留口語語氣詞|请保留口语语气词|這些特徵可能與認知功能相關|这些特征可能与认知功能相关)"
       - "(遇到下列專有名詞|遇到下列专有名词|對於 AD、MCI、HC|对于 AD、MCI、HC)"
+      
   # quality filter (AFTER cleaning + prompt_filter)
   quality_filter:
     enabled: true
