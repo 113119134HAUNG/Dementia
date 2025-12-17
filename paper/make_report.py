@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-make_report.py
+paper/make_report.py
 
-Generate paper-style artifacts from existing outputs:
-1) Data distribution (2D projection + optional logistic decision boundary)
-2) Results summary table (mean ± std) from cv_metrics.json
-3) Boxplot of accuracy across folds (+ mean marker + median line + p-value)
+Generate paper-style artifacts from existing outputs (paper-strict):
+Inputs:
+- cleaned.jsonl (from preprocess.preprocess_chinese)
+- cv_metrics.json (from paper.evaluate_cv)
+
+Outputs (default outdir=/content/chinese_combined/report):
+1) dist_2d_tfidf.png
+2) results_table.csv + results_table.tex
+3) boxplot_accuracy.png / boxplot_precision.png / boxplot_recall.png / boxplot_f1.png
 
 Works in Colab/Jupyter (ignores injected argv like -f).
 """
@@ -14,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,32 +36,53 @@ from paper.cv_dataset import load_cleaned_dataset
 from paper.cv_features import tfidf_features_all
 
 # -----------------------------
-# helpers
+# naming / formatting helpers
 # -----------------------------
-def _norm_method_name(m: str) -> str:
-    m = (m or "").strip().lower()
-    if m == "bert":
-        return "BERT-base (average)"
-    if m == "tfidf":
-        return "Tf-Idf"
-    if m == "glove":
-        return "GloVe (300 d)"
-    if m == "gemma":
-        return "Gemma-2B"
-    return m
+METHOD_ORDER = ["bert", "tfidf", "gemma", "glove"]
+
+DISPLAY_NAME = {
+    "bert": "BERT-base (average)",
+    "tfidf": "Tf-Idf",
+    "glove": "GloVe (300 d)",
+    "gemma": "Gemma-2B",
+}
+
+METRIC_INFO = {
+    "accuracy": ("Accuracy (成功率/正確率) (%)", "Accuracy (%)"),
+    "precision": ("Precision (精確率/準確率) (%)", "Precision (%)"),
+    "recall": ("Recall (召回率) (%)", "Recall (%)"),
+    "f1": ("F1-Score (%)", "F1-Score (%)"),
+}
+
+def _norm_method_key(m: str) -> str:
+    return (m or "").strip().lower()
+
+def _method_display(m_key: str) -> str:
+    m = _norm_method_key(m_key)
+    return DISPLAY_NAME.get(m, m_key)
 
 def _fmt_mean_std(mean: float, std: float, *, scale_100: bool = True, digits: int = 2) -> str:
+    if mean is None or std is None:
+        return ""
+    mean = float(mean)
+    std = float(std)
     if scale_100:
         mean *= 100.0
         std *= 100.0
     return f"{mean:.{digits}f} ± {std:.{digits}f}"
 
-
 def _safe_load_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
+def _ordered_method_keys(methods_dict: Dict[str, Any]) -> List[str]:
+    keys = [_norm_method_key(k) for k in methods_dict.keys()]
+    # keep known ones first, then the rest alphabetically
+    known = [k for k in METHOD_ORDER if k in keys]
+    rest = sorted([k for k in keys if k not in known])
+    return known + rest
+
 # -----------------------------
-# 1) distribution plot (2D + optional boundary)
+# 1) Distribution plot (2D)
 # -----------------------------
 def plot_distribution_2d_tfidf(
     *,
@@ -65,15 +91,15 @@ def plot_distribution_2d_tfidf(
     label_names: List[str],
     tfidf_cfg: Dict[str, Any],
     out_png: Path,
-    title: str = "Logistic Regression Decision Boundary (2D projection)",
-    draw_boundary: bool = True,
+    title: str = "2D Distribution (cleaned dataset) — TF-IDF → SVD",
+    draw_boundary: bool = False,
     random_state: int = 42,
 ) -> None:
     vect_cfg = get_dict(tfidf_cfg, "vectorizer", where="features.tfidf")
     trf_cfg = get_dict(tfidf_cfg, "transformer", where="features.tfidf")
 
-    # High-dim sparse -> 2D (SVD is PCA-like for sparse)
     X_all = tfidf_features_all(X_text, vectorizer_cfg=vect_cfg, transformer_cfg=trf_cfg)
+
     svd = TruncatedSVD(n_components=2, random_state=random_state)
     X2 = svd.fit_transform(X_all)
 
@@ -86,18 +112,14 @@ def plot_distribution_2d_tfidf(
 
         x_min, x_max = X2[:, 0].min() - 0.5, X2[:, 0].max() + 0.5
         y_min, y_max = X2[:, 1].min() - 0.5, X2[:, 1].max() + 0.5
-        xx, yy = np.meshgrid(
-            np.linspace(x_min, x_max, 250),
-            np.linspace(y_min, y_max, 250),
-        )
+        xx, yy = np.meshgrid(np.linspace(x_min, x_max, 250), np.linspace(y_min, y_max, 250))
         grid = np.c_[xx.ravel(), yy.ravel()]
         prob = clf.predict_proba(grid)[:, 1].reshape(xx.shape)
 
-        # background + boundary at 0.5
         plt.contourf(xx, yy, prob, alpha=0.15)
         plt.contour(xx, yy, prob, levels=[0.5], linestyles="--")
 
-    # Scatter by class (use default color cycle; do not set colors explicitly)
+    # scatter by class (do NOT force colors)
     for k in sorted(np.unique(y)):
         mask = (y == k)
         name = label_names[int(k)] if int(k) < len(label_names) else f"class_{k}"
@@ -110,11 +132,11 @@ def plot_distribution_2d_tfidf(
     plt.tight_layout()
 
     ensure_parent(out_png)
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_png, dpi=220)
     plt.close()
 
 # -----------------------------
-# 2) results table from cv_metrics.json
+# 2) Results table (ALL methods, ALL metrics)
 # -----------------------------
 def build_results_table(
     *,
@@ -125,15 +147,17 @@ def build_results_table(
     methods = cv_metrics.get("methods", {}) or {}
 
     rows = []
-    for m_key, m_val in methods.items():
-        sm = (m_val or {}).get("summary", {}) or {}
+    for m_key in _ordered_method_keys(methods):
+        m_val = methods.get(m_key) or {}
+        sm = (m_val.get("summary") or {})
+
         rows.append(
             {
-                "Embedding Model": _norm_method_name(m_key),
-                "Accuracy (%)": _fmt_mean_std(sm.get("accuracy_mean", np.nan), sm.get("accuracy_std", np.nan)),
-                "Precision (%)": _fmt_mean_std(sm.get("precision_mean", np.nan), sm.get("precision_std", np.nan)),
-                "Recall (%)": _fmt_mean_std(sm.get("recall_mean", np.nan), sm.get("recall_std", np.nan)),
-                "F1-Score (%)": _fmt_mean_std(sm.get("f1_mean", np.nan), sm.get("f1_std", np.nan)),
+                "Embedding Model": _method_display(m_key),
+                "Accuracy (%)": _fmt_mean_std(sm.get("accuracy_mean"), sm.get("accuracy_std")),
+                "Precision (%)": _fmt_mean_std(sm.get("precision_mean"), sm.get("precision_std")),
+                "Recall (%)": _fmt_mean_std(sm.get("recall_mean"), sm.get("recall_std")),
+                "F1-Score (%)": _fmt_mean_std(sm.get("f1_mean"), sm.get("f1_std")),
             }
         )
 
@@ -142,50 +166,77 @@ def build_results_table(
     ensure_parent(out_csv)
     df.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
-    # LaTeX table (simple, paper-ready)
     ensure_parent(out_tex)
     out_tex.write_text(df.to_latex(index=False), encoding="utf-8")
 
     return df
 
 # -----------------------------
-# 3) boxplot accuracy across folds (+ p-value)
+# 3) Boxplots (per metric, across models)
 # -----------------------------
-def plot_accuracy_boxplot(
-    *,
+def _extract_fold_metric_arrays(
     cv_metrics: Dict[str, Any],
-    out_png: Path,
-    title: str = "Accuracy across Cross-Validation Folds",
-) -> None:
+    metric_key: str,
+) -> Tuple[List[str], List[np.ndarray]]:
+    """
+    Returns:
+      labels: list of method display names
+      data: list of arrays (each is folds values in percent)
+    """
     methods = cv_metrics.get("methods", {}) or {}
 
-    labels = []
-    data = []
+    labels: List[str] = []
+    data: List[np.ndarray] = []
 
-    for m_key, m_val in methods.items():
-        fold_metrics = (m_val or {}).get("fold_metrics", []) or []
-        accs = [float(r.get("accuracy", np.nan)) for r in fold_metrics if "accuracy" in r]
-        if len(accs) == 0:
+    for m_key in _ordered_method_keys(methods):
+        m_val = methods.get(m_key) or {}
+        fold_metrics = m_val.get("fold_metrics") or []
+        vals = []
+        for r in fold_metrics:
+            if metric_key in r:
+                vals.append(float(r[metric_key]))
+        if len(vals) == 0:
             continue
-        labels.append(_norm_method_name(m_key))
-        data.append(np.array(accs, dtype=float) * 100.0)  # percent
+        labels.append(_method_display(m_key))
+        data.append(np.array(vals, dtype=float) * 100.0)
+
+    return labels, data
+
+def plot_metric_boxplot(
+    *,
+    cv_metrics: Dict[str, Any],
+    metric_key: str,
+    out_png: Path,
+    title: Optional[str] = None,
+) -> None:
+    if metric_key not in METRIC_INFO:
+        raise ValueError(f"Unknown metric_key: {metric_key}")
+
+    y_label, _short = METRIC_INFO[metric_key]
+    if title is None:
+        title = f"{_short} across Cross-Validation Folds"
+
+    labels, data = _extract_fold_metric_arrays(cv_metrics, metric_key=metric_key)
+
+    if len(data) == 0:
+        print(f"[WARN] No data for metric={metric_key}; skip: {out_png}")
+        return
 
     plt.figure()
     ax = plt.gca()
 
-    bp = plt.boxplot(data, labels=labels, showfliers=True)
+    plt.boxplot(data, labels=labels, showfliers=True)
 
     # mean markers
     means = [float(np.nanmean(x)) for x in data]
     xs = np.arange(1, len(means) + 1)
     plt.scatter(xs, means, marker="^", label="Mean")
 
-    # p-value (Friedman, repeated measures across folds)
+    # p-value (Friedman) if possible
     p_val_txt = ""
     try:
         from scipy.stats import friedmanchisquare
         if len(data) >= 2:
-            # requires same length per method; if not, truncate to min
             min_len = min(len(x) for x in data)
             arrs = [x[:min_len] for x in data]
             stat, p = friedmanchisquare(*arrs)
@@ -194,9 +245,8 @@ def plot_accuracy_boxplot(
         p_val_txt = ""
 
     plt.title(title)
-    plt.ylabel("Accuracy (%)")
+    plt.ylabel(y_label)
 
-    # legend text (mean + p_val)
     if p_val_txt:
         plt.legend(title=p_val_txt)
     else:
@@ -204,7 +254,7 @@ def plot_accuracy_boxplot(
 
     plt.tight_layout()
     ensure_parent(out_png)
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_png, dpi=220)
     plt.close()
 
 # -----------------------------
@@ -214,73 +264,97 @@ def run_make_report(
     *,
     config_path: Optional[str],
     outdir: str,
-    dist_method: str = "tfidf",
-    draw_boundary: bool = True,
+    draw_boundary: bool,
 ) -> None:
     cfg = load_text_config(config_path)
     text_cfg = get_text_config(cfg=cfg)
     feat_cfg = get_features_config(cfg=cfg)
 
+    common_cfg = get_dict(cfg, "common", where="root")
+    seed = int(common_cfg.get("seed", 42))
+
     cleaned_jsonl = Path(str(require(text_cfg, "cleaned_jsonl", where="text")))
+
     cv_cfg = get_dict(feat_cfg, "crossval", where="features")
     metrics_output = Path(str(require(cv_cfg, "metrics_output", where="features.crossval")))
 
     out_dir = Path(outdir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # load cleaned dataset
+    # load cleaned dataset for distribution
     data = load_cleaned_dataset(cleaned_jsonl)
     X_text = data.X
     y = data.y
     label_names = data.label_names
 
-    # 1) distribution
-    if dist_method.strip().lower() == "tfidf":
-        tfidf_cfg = get_dict(feat_cfg, "tfidf", where="features")
-        plot_distribution_2d_tfidf(
-            X_text=X_text,
-            y=y,
-            label_names=label_names,
-            tfidf_cfg=tfidf_cfg,
-            out_png=out_dir / "dist_2d_tfidf.png",
-            draw_boundary=bool(draw_boundary),
-            random_state=int(get_dict(cfg, "common", where="root").get("seed", 42)),
-        )
+    # 1) distribution (processed dataset)
+    tfidf_cfg = get_dict(feat_cfg, "tfidf", where="features")
+    plot_distribution_2d_tfidf(
+        X_text=X_text,
+        y=y,
+        label_names=label_names,
+        tfidf_cfg=tfidf_cfg,
+        out_png=out_dir / "dist_2d_tfidf.png",
+        draw_boundary=bool(draw_boundary),
+        random_state=seed,
+    )
 
     # 2/3) metrics-based artifacts
-    if metrics_output.exists():
-        cv_metrics = _safe_load_json(metrics_output)
+    if not metrics_output.exists():
+        print(f"[WARN] metrics_output not found: {metrics_output}")
+        print("[WARN] Please run:  python -m paper.evaluate_cv --config <...>")
+        return
 
-        build_results_table(
-            cv_metrics=cv_metrics,
-            out_csv=out_dir / "results_table.csv",
-            out_tex=out_dir / "results_table.tex",
-        )
+    cv_metrics = _safe_load_json(metrics_output)
 
-        plot_accuracy_boxplot(
-            cv_metrics=cv_metrics,
-            out_png=out_dir / "accuracy_boxplot.png",
-        )
-    else:
-        print(f"[WARN] metrics_output not found: {metrics_output} (skip table/boxplot)")
+    # 2) total table (ALL methods, ALL metrics)
+    build_results_table(
+        cv_metrics=cv_metrics,
+        out_csv=out_dir / "results_table.csv",
+        out_tex=out_dir / "results_table.tex",
+    )
+
+    # 3) boxplots for 4 metrics
+    plot_metric_boxplot(
+        cv_metrics=cv_metrics,
+        metric_key="accuracy",
+        out_png=out_dir / "boxplot_accuracy.png",
+        title="Accuracy across Cross-Validation Folds",
+    )
+    plot_metric_boxplot(
+        cv_metrics=cv_metrics,
+        metric_key="precision",
+        out_png=out_dir / "boxplot_precision.png",
+        title="Precision across Cross-Validation Folds",
+    )
+    plot_metric_boxplot(
+        cv_metrics=cv_metrics,
+        metric_key="recall",
+        out_png=out_dir / "boxplot_recall.png",
+        title="Recall across Cross-Validation Folds",
+    )
+    plot_metric_boxplot(
+        cv_metrics=cv_metrics,
+        metric_key="f1",
+        out_png=out_dir / "boxplot_f1.png",
+        title="F1-Score across Cross-Validation Folds",
+    )
 
     print(f"[INFO] Report outputs saved to: {out_dir}")
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Generate distribution plot + results table + boxplot from pipeline outputs.")
+    p = argparse.ArgumentParser(description="Generate distribution plot + results table + boxplots (4 metrics).")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
     p.add_argument("--outdir", type=str, default="/content/chinese_combined/report", help="Output directory")
-    p.add_argument("--dist-method", type=str, default="tfidf", help="Distribution method: tfidf (more later if needed)")
-    p.add_argument("--no-boundary", action="store_true", help="Disable decision boundary on distribution plot.")
+    p.add_argument("--draw-boundary", action="store_true", help="Draw decision boundary on the distribution plot.")
     return p
 
 def cli_main() -> None:
-    args, _unknown = build_arg_parser().parse_known_args()  # ignore Colab/Jupyter injected args (-f ...)
+    args, _unknown = build_arg_parser().parse_known_args()  # ignore Colab injected args like -f
     run_make_report(
         config_path=args.config,
         outdir=args.outdir,
-        dist_method=args.dist_method,
-        draw_boundary=not bool(args.no_boundary),
+        draw_boundary=bool(args.draw_boundary),
     )
 
 if __name__ == "__main__":
