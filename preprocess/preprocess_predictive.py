@@ -10,6 +10,10 @@ preprocess_predictive.py (paper-strict, converged)
     * if order_by is set, required TSV columns MUST exist (fail-fast, no silent fallback)
     * deterministic output order via sorting by uuid after dedup
     * keep_speakers supports backward-compat: predictive.keep_speakers (fallback)
+
+UPDATES (high precision):
+- drop_silence now drops by speaker in {"sil","sp"} (most reliable), plus value "sil"/"sp".
+- keep_speakers now normalizes "<B>" vs "B" to avoid accidental full-drop.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from settings.enums import ADType
-from tools.config_utils import load_text_config, get_predictive_config
+from tools.config_utils import get_predictive_config, load_text_config
 
 # =====================================================================
 # Strict helpers
@@ -48,6 +52,12 @@ def _norm_str_list(x: Any) -> Optional[List[str]]:
         return out or None
     s = str(x).strip()
     return [s] if s else None
+
+def _norm_speaker(x: Any) -> str:
+    # normalize "<B>" -> "B", also trim whitespace
+    s = "" if x is None else str(x).strip()
+    s = s.strip("<>").strip()
+    return s
 
 # =====================================================================
 # uuid normalize + dedup (single point)
@@ -89,11 +99,22 @@ def tsv_to_text(
     if "value" not in df.columns:
         raise ValueError(f"TSV file {tsv_path} has no 'value' column.")
 
+    # normalize speaker column once (if present)
+    if "speaker" in df.columns:
+        df["_speaker_norm"] = df["speaker"].map(_norm_speaker)
+    else:
+        df["_speaker_norm"] = ""
+
+    # keep_speakers: normalize "<B>" vs "B" etc.
     if keep_speakers is not None:
         if "speaker" not in df.columns:
             raise ValueError(f"TSV file {tsv_path} has no 'speaker' column.")
-        ks = {str(x).strip() for x in keep_speakers if str(x).strip()}
-        df = df[df["speaker"].astype(str).str.strip().isin(ks)]
+        ks = {_norm_speaker(x) for x in keep_speakers if str(x).strip()}
+        df = df[df["_speaker_norm"].isin(ks)]
+
+    # drop_silence: speaker is the most reliable per dataset note (sil/sp = nobody)
+    if drop_silence:
+        df = df[~df["_speaker_norm"].str.lower().isin({"sil", "sp"})]
 
     # paper-strict: if order_by is specified, required columns MUST exist (no silent fallback)
     if order_by == "no":
@@ -110,9 +131,12 @@ def tsv_to_text(
     vals = df["value"].astype(str).str.strip()
     vals = vals[vals != ""]
 
+    # value-based silence fallback (in case some files encode silence in "value")
     if drop_silence:
-        vals = vals[vals.str.lower() != "sil"]
+        vlow = vals.str.lower()
+        vals = vals[(vlow != "sil") & (vlow != "sp")]
 
+    df = df.drop(columns=["_speaker_norm"], errors="ignore")
     return " ".join(vals.tolist())
 
 # =====================================================================
