@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-preprocess_chinese.py (paper-strict)
+preprocess/preprocess_chinese.py (paper-strict)
+
+Step 0 (optional):
+- Rebuild NCMMSC ASR JSONL from ASR CSV (id,label,transcript,audio_path,duration)
+  controlled by CLI flag: --force-asr-jsonl
 
 Step 1-2:
 - Load YAML once.
@@ -70,7 +74,9 @@ def _normalize_schema(df: pd.DataFrame, *, dataset_name: str) -> pd.DataFrame:
     if "Text_interviewer_participant" not in out.columns and "transcript" in out.columns:
         out = out.rename(columns={"transcript": "Text_interviewer_participant"})
     if "Text_interviewer_participant" not in out.columns:
-        raise ValueError(f"[{dataset_name}] Missing text column (expected 'Text_interviewer_participant' or 'transcript').")
+        raise ValueError(
+            f"[{dataset_name}] Missing text column (expected 'Text_interviewer_participant' or 'transcript')."
+        )
     out["Text_interviewer_participant"] = out["Text_interviewer_participant"].fillna("").astype(str)
 
     # Languages (optional)
@@ -83,6 +89,50 @@ def _normalize_schema(df: pd.DataFrame, *, dataset_name: str) -> pd.DataFrame:
     # Deterministic row order
     out = out.sort_values(by=["Dataset", "ID"], kind="mergesort").reset_index(drop=True)
     return out
+
+def rebuild_ncmmsc_jsonl_from_asr_csv(
+    *,
+    asr_cfg: Dict[str, Any],
+    text_cfg: Dict[str, Any],
+    force: bool,
+    dataset_name: str = "NCMMSC2021_AD_Competition",
+) -> Optional[str]:
+    """
+    Build / overwrite text.ncmmsc_jsonl from asr.output_csv.
+
+    ASR CSV expected columns:
+      id,label,transcript,audio_path,duration
+    """
+    out_jsonl = text_cfg.get("ncmmsc_jsonl", None)
+    if not out_jsonl:
+        # if user didn't configure it, just skip
+        return None
+
+    out_path = Path(str(out_jsonl)).expanduser()
+    csv_path = Path(str(_require(asr_cfg, "output_csv", where="asr"))).expanduser()
+
+    if out_path.exists() and not force:
+        print(f"[INFO] NCMMSC ASR JSONL exists -> skip rebuild (force=False): {out_path}")
+        return str(out_path)
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"[asr.output_csv] not found: {csv_path}")
+
+    print(f"[INFO] Rebuilding NCMMSC ASR JSONL from CSV (force={force})")
+    df = pd.read_csv(csv_path)
+
+    # Normalize to pipeline schema + keep audio_path/duration if present
+    df = _normalize_schema(df, dataset_name=dataset_name)
+
+    # keep optional columns if present (no harm)
+    for col in ["audio_path", "duration"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_json(out_path, orient="records", lines=True, force_ascii=False)
+    print(f"[INFO] Built NCMMSC ASR JSONL: {out_path} (n={len(df)})")
+    return str(out_path)
 
 def merge_corpora_to_jsonl(*, text_cfg: Dict[str, Any]) -> str:
     output_dir = Path(str(_require(text_cfg, "output_dir", where="text"))).expanduser()
@@ -128,12 +178,18 @@ def merge_corpora_to_jsonl(*, text_cfg: Dict[str, Any]) -> str:
     print(f"[INFO] Saved combined JSONL to: {combined_path} (n={len(merged)})")
     return str(combined_path)
 
-def run_preprocess_chinese(config_path: Optional[str] = None) -> str:
+def run_preprocess_chinese(config_path: Optional[str] = None, *, force_asr_jsonl: bool = False) -> str:
     cfg = load_text_config(config_path)
     text_cfg = _get_dict(cfg, "text", where="root")
+    asr_cfg = _get_dict(cfg, "asr", where="root")
 
+    # Step 0: (optional) rebuild NCMMSC JSONL from ASR CSV
+    rebuild_ncmmsc_jsonl_from_asr_csv(asr_cfg=asr_cfg, text_cfg=text_cfg, force=force_asr_jsonl)
+
+    # Step 1-2: merge corpora JSONL -> combined JSONL
     combined_jsonl = merge_corpora_to_jsonl(text_cfg=text_cfg)
 
+    # Step 3-12: cleaning is in chinese_steps
     cleaned_jsonl = str(_require(text_cfg, "cleaned_jsonl", where="text"))
     df_clean = load_and_process_chinese(combined_jsonl, text_cfg=text_cfg)
     out_path = save_cleaned_jsonl(df_clean, output_path=cleaned_jsonl)
@@ -142,11 +198,22 @@ def run_preprocess_chinese(config_path: Optional[str] = None) -> str:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Merge Chinese corpora and run paper-strict text preprocessing (YAML-driven).")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
+    p.add_argument(
+        "--force-asr-jsonl",
+        action="store_true",
+        help="Rebuild text.ncmmsc_jsonl from asr.output_csv even if JSONL already exists.",
+    )
     return p
 
 def cli_main() -> None:
-    args = build_arg_parser().parse_args()
-    out = run_preprocess_chinese(config_path=args.config)
+    ap = build_arg_parser()
+    # IMPORTANT: ignore unknown args to be robust in notebook/colab contexts
+    args, _unknown = ap.parse_known_args()
+
+    out = run_preprocess_chinese(
+        config_path=args.config,
+        force_asr_jsonl=bool(args.force_asr_jsonl),
+    )
     print(f"[INFO] DONE: {out}")
 
 if __name__ == "__main__":
