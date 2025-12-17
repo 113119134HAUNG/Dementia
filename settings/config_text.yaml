@@ -17,11 +17,11 @@ common:
 
 asr:
   # choose ONE:
-  data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/raw_vad"
+    data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge_vad"
   # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/raw"
+  # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/raw_vad"
   # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge"
-  # data_root: "/content/NCMMSC2021_AD_Competition-dev/dataset/merge_vad"
-
+  
   output_csv: "/content/ncmmsc_merged_asr_transcripts.csv"
   model_size: "large-v3"
   device: "cuda"
@@ -44,7 +44,7 @@ asr:
     log_prob_threshold: -1.0
     no_speech_threshold: 0.6
     condition_on_previous_text: false
-    vad_filter: true
+    vad_filter: false
     without_timestamps: true
 
 predictive:
