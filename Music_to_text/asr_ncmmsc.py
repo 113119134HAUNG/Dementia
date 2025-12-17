@@ -21,10 +21,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from faster_whisper import WhisperModel
 
-from tools.config_utils import load_text_config, get_asr_config
+from tools.config_utils import get_asr_config, load_text_config
 
 try:
     from tqdm.auto import tqdm
+
     HAS_TQDM = True
 except Exception:
     HAS_TQDM = False
@@ -79,7 +80,9 @@ def _build_decode_kwargs(asr_cfg: Dict[str, Any]) -> Dict[str, Any]:
     decode_cfg = asr_cfg.get("decode")
     if decode_cfg is None or not isinstance(decode_cfg, dict):
         raise KeyError("Missing asr.decode (dict) in YAML.")
-    return dict(decode_cfg)
+    # drop None values to avoid passing invalid kwargs
+    out = {k: v for k, v in decode_cfg.items() if v is not None}
+    return dict(out)
 
 def run_ncmmsc_asr(
     config_path: Optional[str] = None,
@@ -95,7 +98,7 @@ def run_ncmmsc_asr(
     model_size = str(asr_cfg["model_size"])
     device = str(asr_cfg["device"])
     compute_type = str(asr_cfg["compute_type"])
-    initial_prompt = str(asr_cfg.get("initial_prompt", "") or "")
+    initial_prompt = str(asr_cfg.get("initial_prompt", "") or "").strip()
 
     if not data_root.exists():
         raise FileNotFoundError(f"ASR data_root not found: {data_root}")
@@ -167,6 +170,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def cli_main() -> None:
     args = build_arg_parser().parse_args()
     run_ncmmsc_asr(config_path=args.config, labels=args.labels, cap_per_label=args.cap_per_label)
+
 
 if __name__ == "__main__":
     cli_main()
