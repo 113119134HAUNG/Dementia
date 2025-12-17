@@ -7,6 +7,13 @@ Evaluation core:
 - evaluate with precomputed folds
 - (optional) TF-IDF train-only per fold evaluation
 - (optional) TRAIN-only balancing per fold (downsample/upsample)
+
+Notes:
+- For TF-IDF "train-only", we MUST:
+  (1) (optional) balance TRAIN indices
+  (2) fit TF-IDF on TRAIN only
+  (3) transform TEST using TRAIN-fitted TF-IDF
+  This avoids leakage and matches paper-strict setting.
 """
 
 from __future__ import annotations
@@ -17,6 +24,10 @@ import numpy as np
 from sklearn import metrics
 from sklearn.linear_model import LogisticRegression
 
+
+# ---------------------------
+# Model builder
+# ---------------------------
 def build_logreg(cfg: Dict[str, Any]) -> LogisticRegression:
     C = float(cfg.get("C", 1.0))
     class_weight = cfg.get("class_weight", "balanced")
@@ -34,6 +45,10 @@ def build_logreg(cfg: Dict[str, Any]) -> LogisticRegression:
         random_state=random_state,
     )
 
+
+# ---------------------------
+# Train balancing helpers
+# ---------------------------
 def _parse_train_balance_cfg(train_balance_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     cfg = train_balance_cfg if isinstance(train_balance_cfg, dict) else {}
     enabled = bool(cfg.get("enabled", False))
@@ -43,6 +58,7 @@ def _parse_train_balance_cfg(train_balance_cfg: Optional[Dict[str, Any]]) -> Dic
     rs = cfg.get("random_state", None)
     rs_i = None if rs is None else int(rs)
     return {"enabled": enabled, "strategy": strategy, "random_state": rs_i}
+
 
 def _balance_train_indices(
     tr: np.ndarray,
@@ -54,8 +70,9 @@ def _balance_train_indices(
     """
     Return new training indices (subset or resampled) for TRAIN ONLY.
     - downsample: each class -> min class count (no replacement)
-    - upsample: each class -> max class count (with replacement)
+    - upsample:   each class -> max class count (with replacement)
     """
+    tr = np.asarray(tr, dtype=np.int64)
     ytr = y[tr]
     classes = np.unique(ytr)
     if len(classes) < 2:
@@ -71,10 +88,7 @@ def _balance_train_indices(
         picked_pos = []
         for c in classes:
             pos = idx_by_class[c]
-            if len(pos) == n:
-                sel = pos
-            else:
-                sel = rng.choice(pos, size=n, replace=False)
+            sel = pos if len(pos) == n else rng.choice(pos, size=n, replace=False)
             picked_pos.append(sel)
         picked_pos = np.concatenate(picked_pos, axis=0)
         rng.shuffle(picked_pos)
@@ -85,10 +99,7 @@ def _balance_train_indices(
         picked_pos = []
         for c in classes:
             pos = idx_by_class[c]
-            if len(pos) == n:
-                sel = pos
-            else:
-                sel = rng.choice(pos, size=n, replace=True)
+            sel = pos if len(pos) == n else rng.choice(pos, size=n, replace=True)
             picked_pos.append(sel)
         picked_pos = np.concatenate(picked_pos, axis=0)
         rng.shuffle(picked_pos)
@@ -96,6 +107,19 @@ def _balance_train_indices(
 
     return tr
 
+
+def _label_counts(y: np.ndarray, idx: np.ndarray) -> Dict[str, int]:
+    """
+    Counts for labels 0/1 only (your pipeline uses 0=HC, 1=AD).
+    """
+    idx = np.asarray(idx, dtype=np.int64)
+    yy = y[idx]
+    return {"HC": int((yy == 0).sum()), "AD": int((yy == 1).sum())}
+
+
+# ---------------------------
+# Generic evaluation: precomputed features
+# ---------------------------
 def evaluate_with_precomputed_folds(
     X_feats_all: np.ndarray,
     y: np.ndarray,
@@ -119,6 +143,9 @@ def evaluate_with_precomputed_folds(
     cms: List[List[List[int]]] = []
 
     for fold_i, (tr, te) in enumerate(folds, start=1):
+        tr = np.asarray(tr, dtype=np.int64)
+        te = np.asarray(te, dtype=np.int64)
+
         tr_use = tr
         n_train_before = int(len(tr))
 
@@ -143,7 +170,7 @@ def evaluate_with_precomputed_folds(
 
         fold_rows.append(
             {
-                "fold": fold_i,
+                "fold": int(fold_i),
                 "accuracy": acc,
                 "precision": prec,
                 "recall": rec,
@@ -151,6 +178,8 @@ def evaluate_with_precomputed_folds(
                 "n_train": int(len(tr_use)),
                 "n_train_before_balance": n_train_before,
                 "n_test": int(len(te)),
+                "train_label_counts": _label_counts(y, tr_use),
+                "test_label_counts": _label_counts(y, te),
             }
         )
 
@@ -195,6 +224,10 @@ def evaluate_with_precomputed_folds(
         "train_balance": tb,
     }
 
+
+# ---------------------------
+# TF-IDF train-only (per fold)
+# ---------------------------
 def evaluate_tfidf_trainonly(
     *,
     X_text: List[str],
@@ -215,7 +248,7 @@ def evaluate_tfidf_trainonly(
     TF-IDF strictly fit on TRAIN per fold.
     Also supports TRAIN-only balancing per fold (before TF-IDF fit).
     """
-    from paper.cv_features import tfidf_features_fold_fit  # local import keeps dependencies clean
+    from paper.cv_features import tfidf_features_fold_fit  # local import keeps deps clean
 
     clf_template = build_logreg(logreg_cfg)
 
@@ -226,22 +259,22 @@ def evaluate_tfidf_trainonly(
     cms: List[List[List[int]]] = []
 
     for fold_i, (tr, te) in enumerate(folds, start=1):
-        tr_idx = tr.tolist() if hasattr(tr, "tolist") else list(tr)
-        te_idx = te.tolist() if hasattr(te, "tolist") else list(te)
+        tr = np.asarray(tr, dtype=np.int64)
+        te = np.asarray(te, dtype=np.int64)
 
-        n_train_before = int(len(tr_idx))
+        n_train_before = int(len(tr))
+        tr_use = tr
 
         if do_balance:
             seed = (tb["random_state"] if tb["random_state"] is not None else 0) + int(fold_i)
             rng = np.random.default_rng(seed)
+            tr_use = _balance_train_indices(tr, y, strategy=tb["strategy"], rng=rng)
 
-            tr_arr = np.asarray(tr_idx, dtype=np.int64)
-            tr_bal = _balance_train_indices(tr_arr, y, strategy=tb["strategy"], rng=rng)
-            tr_idx = tr_bal.tolist()
+        # Text slices
+        Xtr_txt = [X_text[i] for i in tr_use.tolist()]
+        Xte_txt = [X_text[i] for i in te.tolist()]
 
-        Xtr_txt = [X_text[i] for i in tr_idx]
-        Xte_txt = [X_text[i] for i in te_idx]
-
+        # Fit TF-IDF on TRAIN (after balancing), transform TEST
         Xtr, Xte = tfidf_features_fold_fit(
             Xtr_txt,
             Xte_txt,
@@ -249,8 +282,8 @@ def evaluate_tfidf_trainonly(
             transformer_cfg=transformer_cfg,
         )
 
-        ytr = y[tr_idx]
-        yte = y[te_idx]
+        ytr = y[tr_use]
+        yte = y[te]
 
         clf = LogisticRegression(**clf_template.get_params())
         clf.fit(Xtr, ytr)
@@ -263,14 +296,16 @@ def evaluate_tfidf_trainonly(
 
         fold_rows.append(
             {
-                "fold": fold_i,
+                "fold": int(fold_i),
                 "accuracy": acc,
                 "precision": prec,
                 "recall": rec,
                 "f1": f1,
-                "n_train": int(len(tr_idx)),
+                "n_train": int(len(tr_use)),
                 "n_train_before_balance": n_train_before,
-                "n_test": int(len(te_idx)),
+                "n_test": int(len(te)),
+                "train_label_counts": _label_counts(y, tr_use),
+                "test_label_counts": _label_counts(y, te),
             }
         )
 
