@@ -8,10 +8,6 @@ This file only:
 - builds/reuses fold indices
 - runs methods (tfidf/bert/glove/gemma) using same folds
 - saves metrics JSON
-
-No feature extraction code here.
-No fold IO code here.
-No evaluation-core code here.
 """
 
 from __future__ import annotations
@@ -68,6 +64,11 @@ def run_evaluate_cv(
     random_state = int(require(cv_cfg, "random_state", where="features.crossval"))
     output_indices = Path(str(require(cv_cfg, "output_indices", where="features.crossval")))
 
+    # train balance knobs
+    train_balance_cfg = cv_cfg.get("train_balance", {})
+    if not isinstance(train_balance_cfg, dict):
+        train_balance_cfg = {}
+
     # metrics knobs
     average = str(cv_cfg.get("metrics_average", "macro"))
     zero_division = int(cv_cfg.get("zero_division", 0))
@@ -118,6 +119,7 @@ def run_evaluate_cv(
             "metrics_average": average,
             "zero_division": int(zero_division),
             "tfidf_fit_scope": tfidf_fit_scope,
+            "train_balance": train_balance_cfg,
         },
         "methods": {},
     }
@@ -146,6 +148,7 @@ def run_evaluate_cv(
                     print_cm=print_cm,
                     label_names=label_names,
                     method_name="tfidf",
+                    train_balance_cfg=train_balance_cfg,
                 )
             else:
                 res = evaluate_tfidf_trainonly(
@@ -161,6 +164,7 @@ def run_evaluate_cv(
                     print_cm=print_cm,
                     label_names=label_names,
                     method_name="tfidf",
+                    train_balance_cfg=train_balance_cfg,
                 )
 
             results["methods"]["tfidf"] = res
@@ -193,6 +197,7 @@ def run_evaluate_cv(
                 print_cm=print_cm,
                 label_names=label_names,
                 method_name="bert",
+                train_balance_cfg=train_balance_cfg,
             )
 
         elif m == "glove":
@@ -205,7 +210,6 @@ def run_evaluate_cv(
             pooling = str(glove_cfg.get("pooling", "sum_l2norm"))
             logreg_cfg = get_dict(glove_cfg, "logreg", where="features.glove")
 
-            # Chinese-ready knobs (YAML-driven)
             tokenizer = str(glove_cfg.get("tokenizer", "whitespace")).strip().lower()
             max_words = glove_cfg.get("max_words", None)
             max_words_i = None if max_words is None else int(max_words)
@@ -233,6 +237,7 @@ def run_evaluate_cv(
                 print_cm=print_cm,
                 label_names=label_names,
                 method_name="glove",
+                train_balance_cfg=train_balance_cfg,
             )
 
         elif m == "gemma":
@@ -263,6 +268,7 @@ def run_evaluate_cv(
                 print_cm=print_cm,
                 label_names=label_names,
                 method_name="gemma",
+                train_balance_cfg=train_balance_cfg,
             )
 
         else:
