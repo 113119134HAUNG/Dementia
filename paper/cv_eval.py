@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-paper/cv_eval.py
+cv_eval.py
 
 Evaluation core:
 - build LogisticRegression from YAML
