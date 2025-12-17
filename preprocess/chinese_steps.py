@@ -415,7 +415,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     lang_cfg = _get_dict(text_cfg, "language_filter", where="text")
     df = drop_languages(df, drop_langs=lang_cfg.get("drop_languages", []) or [])
 
-    # (A) pre-clean subset: restrict scope only
+    # (A) pre-clean subset: restrict scope only (NO balance/cap here)
     df = apply_subset(df, _subset_cfg_preclean(text_cfg))
     print(f"[INFO] After pre-clean subset: {len(df)} samples remaining.")
     if not df.empty:
@@ -433,15 +433,15 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     # (C) quality filter
     df = _apply_quality_filter_from_cfg(df, text_cfg)
 
-    # (D) final subset after cleaning+filters
+    # (D) length filter BEFORE balancing (你要的：length 後再 balance)
+    df = _apply_length_filter_from_cfg(df, text_cfg)
+
+    # (E) final subset AFTER length filter (balance/cap happen here)
     df = apply_subset(df, text_cfg)
-    print(f"[INFO] After final subset: {len(df)} samples remaining.")
+    print(f"[INFO] After final subset (post-length): {len(df)} samples remaining.")
     if not df.empty:
         print("[INFO] Label distribution after final subset:\n", df["Diagnosis"].value_counts())
-    _assert_no_unknown(df, stage="final_subset")
-
-    # (E) length filter
-    df = _apply_length_filter_from_cfg(df, text_cfg)
+    _assert_no_unknown(df, stage="final_subset_post_length")
 
     df = _stable_sort(df).reset_index(drop=True)
     return df
