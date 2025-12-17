@@ -10,6 +10,7 @@ Holds Step 3-12:
 - quality filter
 - final subset
 - length filter
+- (optional) post-length subset/balance
 - save cleaned.jsonl
 """
 
@@ -36,7 +37,6 @@ def _require(cfg: Dict[str, Any], key: str, *, where: str = "") -> Any:
         raise KeyError(f"Config missing required key: {prefix}{key}")
     return cfg[key]
 
-
 def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, Any]:
     v = _require(cfg, key, where=where)
     if not isinstance(v, dict):
@@ -44,6 +44,12 @@ def _get_dict(cfg: Dict[str, Any], key: str, *, where: str = "") -> Dict[str, An
         raise ValueError(f"{prefix}{key} must be a dict.")
     return v
 
+def _get_list(cfg: Dict[str, Any], key: str, *, where: str = "") -> List[Any]:
+    v = _require(cfg, key, where=where)
+    if not isinstance(v, list):
+        prefix = f"{where}." if where else ""
+        raise ValueError(f"{prefix}{key} must be a list.")
+    return v
 
 def _stable_sort(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -65,18 +71,16 @@ def _subset_cfg_preclean(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg.pop("cap_per_class", None)
     return cfg
 
-def _assert_required_cols(df: pd.DataFrame, cols: List[str], *, stage: str) -> None:
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"[{stage}] Missing required columns: {missing}")
-
 def _assert_no_unknown(df: pd.DataFrame, *, stage: str) -> None:
     if df is None or df.empty:
         return
-    if "Diagnosis" not in df.columns:
-        raise ValueError(f"[{stage}] Missing column 'Diagnosis'")
     if (df["Diagnosis"].astype(str) == "Unknown").any():
         raise ValueError(f"Found Diagnosis=='Unknown' at stage={stage}. Fix label_map/ADType or target_labels.")
+
+def _assert_required_cols(df: pd.DataFrame, cols: List[str], *, stage: str) -> None:
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns at stage={stage}: {missing}. Columns={list(df.columns)}")
 
 # =====================================================================
 # Step 3: dedup / label normalize / language filter
@@ -91,7 +95,6 @@ def dedup_records(df: pd.DataFrame) -> pd.DataFrame:
             print(f"[WARN] Found {dup} duplicated rows by (Dataset, ID) -> keep first.")
             out = out.drop_duplicates(subset=["Dataset", "ID"], keep="first")
     return out.reset_index(drop=True)
-
 
 def normalize_diagnosis_labels(df: pd.DataFrame, *, label_map: Dict[str, Any]) -> pd.DataFrame:
     if "Diagnosis" not in df.columns:
@@ -138,18 +141,15 @@ def drop_languages(df: pd.DataFrame, *, drop_langs: List[str]) -> pd.DataFrame:
 # Step 7: cleaning
 # =====================================================================
 def clean_text_column(df: pd.DataFrame) -> pd.DataFrame:
-    _assert_required_cols(df, ["Text_interviewer_participant"], stage="clean_text_column")
+    if "Text_interviewer_participant" not in df.columns:
+        raise ValueError("Expected column 'Text_interviewer_participant' not found.")
     out = df.copy()
-
-    # light ASR normalize first (safe on TSV too)
     out["Text_interviewer_participant"] = out["Text_interviewer_participant"].apply(clean_asr_chinese)
-
-    # structured cleanup (markers / &codes / dialect tags / etc.)
     out["Text_interviewer_participant"] = out["Text_interviewer_participant"].apply(clean_structured_chinese)
     return out
 
 # =====================================================================
-# Step 8: two-stage prompt filter (leading + any echo)
+# Step 8: two-stage prompt filter
 # =====================================================================
 def _log_prompt_filter_stats(before_s: pd.Series, after_s: pd.Series, *, scope_name: str) -> None:
     try:
@@ -168,26 +168,26 @@ def _get_prompt_filter_cfg(text_cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(pf_cfg, dict):
         pf_cfg = {}
 
-    patterns = pf_cfg.get("patterns", []) or []
-    echo_patterns = pf_cfg.get("echo_patterns", []) or []
-
     out = {
         "enabled": bool(pf_cfg.get("enabled", False)),
         "apply_datasets": pf_cfg.get("apply_datasets", None),
-        "mode": str(pf_cfg.get("mode", "leading")).strip(),
+        "mode": str(pf_cfg.get("mode", "leading")),
         "max_leading_sentences": int(pf_cfg.get("max_leading_sentences", 8)),
         "min_keep_chars": int(pf_cfg.get("min_keep_chars", 20)),
-        "patterns": [str(p) for p in patterns if str(p).strip()],
+        "patterns": pf_cfg.get("patterns", []) or [],
         "echo_enabled": bool(pf_cfg.get("echo_enabled", True)),
-        "echo_patterns": [str(p) for p in echo_patterns if str(p).strip()],
+        "echo_patterns": pf_cfg.get("echo_patterns", []) or [],
     }
 
     if out["apply_datasets"] is not None and not isinstance(out["apply_datasets"], list):
         out["apply_datasets"] = None
 
+    if not isinstance(out["patterns"], list):
+        out["patterns"] = []
+    if not isinstance(out["echo_patterns"], list):
+        out["echo_patterns"] = []
+
     out["echo_enabled"] = bool(out["echo_enabled"]) and (len(out["echo_patterns"]) > 0)
-    if out["mode"] not in ("leading", "any"):
-        out["mode"] = "leading"
     return out
 
 def _apply_prompt_filter_two_stage_series(
@@ -203,7 +203,6 @@ def _apply_prompt_filter_two_stage_series(
 ) -> pd.Series:
     before = s.copy()
 
-    # Pass 1: leading (safe)
     after_leading = before.apply(
         lambda x: prompt_filter_text(
             x,
@@ -216,7 +215,6 @@ def _apply_prompt_filter_two_stage_series(
     )
     _log_prompt_filter_stats(before, after_leading, scope_name=f"prompt_leading({scope_name})")
 
-    # Pass 2: any (echo-only)
     if echo_enabled:
         after_echo = after_leading.apply(
             lambda x: prompt_filter_text(
@@ -244,8 +242,8 @@ def _apply_prompt_filter_two_stage(df: pd.DataFrame, text_cfg: Dict[str, Any]) -
     out = df.copy()
 
     if pf["apply_datasets"] and "Dataset" in out.columns:
-        apply_set = {str(x).strip() for x in pf["apply_datasets"] if str(x).strip()}
-        mask = out["Dataset"].astype(str).str.strip().isin(apply_set)
+        apply_set = {str(x) for x in pf["apply_datasets"]}
+        mask = out["Dataset"].astype(str).isin(apply_set)
         if mask.any():
             out.loc[mask, "Text_interviewer_participant"] = _apply_prompt_filter_two_stage_series(
                 out.loc[mask, "Text_interviewer_participant"],
@@ -364,9 +362,7 @@ def length_filter(
         return df
 
     out = df.copy()
-
-    # HIGH precision: do NOT let spaces inflate length
-    out["length"] = out["Text_interviewer_participant"].fillna("").astype(str).apply(lambda t: len(t.replace(" ", "")))
+    out["length"] = out["Text_interviewer_participant"].apply(len)
 
     stats = out.groupby("Diagnosis")["length"].agg(["min", "max", "mean", "std"])
     stats["std"] = stats["std"].fillna(0.0)
@@ -404,7 +400,6 @@ def _apply_length_filter_from_cfg(df: pd.DataFrame, text_cfg: Dict[str, Any]) ->
 # =====================================================================
 def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -> pd.DataFrame:
     df = pd.read_json(Path(merged_jsonl_path), lines=True)
-
     _assert_required_cols(df, ["ID", "Diagnosis", "Text_interviewer_participant", "Dataset"], stage="load")
 
     df = dedup_records(df)
@@ -415,7 +410,7 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     lang_cfg = _get_dict(text_cfg, "language_filter", where="text")
     df = drop_languages(df, drop_langs=lang_cfg.get("drop_languages", []) or [])
 
-    # (A) pre-clean subset: restrict scope only (NO balance/cap here)
+    # (A) pre-clean subset: restrict scope only
     df = apply_subset(df, _subset_cfg_preclean(text_cfg))
     print(f"[INFO] After pre-clean subset: {len(df)} samples remaining.")
     if not df.empty:
@@ -433,15 +428,23 @@ def load_and_process_chinese(merged_jsonl_path: str, text_cfg: Dict[str, Any]) -
     # (C) quality filter
     df = _apply_quality_filter_from_cfg(df, text_cfg)
 
-    # (D) length filter BEFORE balancing (你要的：length 後再 balance)
-    df = _apply_length_filter_from_cfg(df, text_cfg)
-
-    # (E) final subset AFTER length filter (balance/cap happen here)
+    # (D) final subset after cleaning+filters
     df = apply_subset(df, text_cfg)
-    print(f"[INFO] After final subset (post-length): {len(df)} samples remaining.")
+    print(f"[INFO] After final subset: {len(df)} samples remaining.")
     if not df.empty:
         print("[INFO] Label distribution after final subset:\n", df["Diagnosis"].value_counts())
-    _assert_no_unknown(df, stage="final_subset_post_length")
+    _assert_no_unknown(df, stage="final_subset")
+
+    # (E) length filter
+    df = _apply_length_filter_from_cfg(df, text_cfg)
+
+    # (F) OPTIONAL: post-length subset/balance (only if explicitly enabled)
+    if bool(text_cfg.get("post_length_subset", False)):
+        df = apply_subset(df, text_cfg)
+        print(f"[INFO] After post-length subset: {len(df)} samples remaining.")
+        if not df.empty:
+            print("[INFO] Label distribution after post-length subset:\n", df["Diagnosis"].value_counts())
+        _assert_no_unknown(df, stage="post_length_subset")
 
     df = _stable_sort(df).reset_index(drop=True)
     return df
@@ -454,13 +457,6 @@ def save_cleaned_jsonl(df: pd.DataFrame, *, output_path: str) -> str:
         raise ValueError("df is None (nothing to save).")
 
     df = _stable_sort(df).reset_index(drop=True)
-
-    # stable column order (paper-friendly)
-    prefer = ["Dataset", "ID", "Diagnosis", "Languages", "Text_interviewer_participant"]
-    cols = prefer + [c for c in df.columns if c not in prefer]
-    cols = [c for c in cols if c in df.columns]
-    df = df[cols]
-
     df.to_json(out_p, orient="records", lines=True, force_ascii=False)
     print(f"[INFO] Saved cleaned JSONL to: {out_p} (n={len(df)})")
     return str(out_p)
