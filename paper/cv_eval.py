@@ -6,17 +6,24 @@ Evaluation core:
 - build LogisticRegression from YAML
 - evaluate with precomputed folds
 - (optional) TF-IDF train-only per fold evaluation (to keep evaluate_cv clean)
+
+NEW in this revision:
+- OPTIONAL train-only balancing per fold (downsample / upsample), applied to TRAIN indices only.
+  Test fold distribution is NEVER changed.
+- Backward-compatible: if caller doesn't pass train_balance_cfg, behavior is identical to before.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
 from sklearn import metrics
 from sklearn.linear_model import LogisticRegression
 
-
+# =====================================================================
+# Model builder
+# =====================================================================
 def build_logreg(cfg: Dict[str, Any]) -> LogisticRegression:
     C = float(cfg.get("C", 1.0))
     class_weight = cfg.get("class_weight", "balanced")
@@ -34,6 +41,74 @@ def build_logreg(cfg: Dict[str, Any]) -> LogisticRegression:
         random_state=random_state,
     )
 
+# =====================================================================
+# Train-only balancing helper (fold-local)
+# =====================================================================
+def _balance_train_indices(
+    train_idx: np.ndarray,
+    y: np.ndarray,
+    *,
+    enabled: bool,
+    strategy: str,
+    seed: int,
+) -> np.ndarray:
+    """
+    Balance TRAIN indices only.
+
+    strategy:
+      - "none": do nothing
+      - "downsample": downsample majority to minority
+      - "upsample": upsample minority to majority (with replacement)
+
+    Returns a NEW shuffled index array. If balancing is not feasible, returns original train_idx.
+    """
+    if not enabled:
+        return train_idx
+
+    st = (strategy or "none").strip().lower()
+    if st in ("none", "off", "false", ""):
+        return train_idx
+
+    train_idx = np.asarray(train_idx, dtype=np.int64)
+    if train_idx.size == 0:
+        return train_idx
+
+    y_tr = y[train_idx]
+    cls0 = train_idx[y_tr == 0]
+    cls1 = train_idx[y_tr == 1]
+    if cls0.size == 0 or cls1.size == 0:
+        return train_idx
+
+    rng = np.random.RandomState(int(seed))
+
+    n0, n1 = int(cls0.size), int(cls1.size)
+    if st == "downsample":
+        target = min(n0, n1)
+        cls0b = rng.choice(cls0, size=target, replace=False)
+        cls1b = rng.choice(cls1, size=target, replace=False)
+    elif st == "upsample":
+        target = max(n0, n1)
+        cls0b = rng.choice(cls0, size=target, replace=True)
+        cls1b = rng.choice(cls1, size=target, replace=True)
+    else:
+        raise ValueError("train_balance.strategy must be one of: none | downsample | upsample")
+
+    out = np.concatenate([cls0b, cls1b]).astype(np.int64, copy=False)
+    rng.shuffle(out)
+    return out
+
+def _parse_train_balance_cfg(train_balance_cfg: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
+    if not isinstance(train_balance_cfg, dict):
+        return False, "none"
+    enabled = bool(train_balance_cfg.get("enabled", False))
+    strategy = str(train_balance_cfg.get("strategy", "none")).strip()
+    if strategy.lower() not in ("none", "downsample", "upsample", "off", "false", ""):
+        raise ValueError("train_balance.strategy must be one of: none | downsample | upsample")
+    return enabled, strategy
+
+# =====================================================================
+# Core evaluators
+# =====================================================================
 def evaluate_with_precomputed_folds(
     X_feats_all: np.ndarray,
     y: np.ndarray,
@@ -46,16 +121,32 @@ def evaluate_with_precomputed_folds(
     print_cm: bool,
     label_names: List[str],
     method_name: str,
+    # NEW (optional; backward compatible)
+    train_balance_cfg: Optional[Dict[str, Any]] = None,
+    random_state: int = 42,
 ) -> Dict[str, Any]:
     clf_template = build_logreg(logreg_cfg)
+
+    tb_enabled, tb_strategy = _parse_train_balance_cfg(train_balance_cfg)
 
     fold_rows: List[Dict[str, Any]] = []
     cms: List[List[List[int]]] = []
 
     for fold_i, (tr, te) in enumerate(folds, start=1):
-        Xtr = X_feats_all[tr]
+        tr = np.asarray(tr, dtype=np.int64)
+        te = np.asarray(te, dtype=np.int64)
+
+        tr_used = _balance_train_indices(
+            tr,
+            y,
+            enabled=tb_enabled,
+            strategy=tb_strategy,
+            seed=int(random_state) + 997 * fold_i,
+        )
+
+        Xtr = X_feats_all[tr_used]
         Xte = X_feats_all[te]
-        ytr = y[tr]
+        ytr = y[tr_used]
         yte = y[te]
 
         clf = LogisticRegression(**clf_template.get_params())
@@ -74,8 +165,10 @@ def evaluate_with_precomputed_folds(
                 "precision": prec,
                 "recall": rec,
                 "f1": f1,
-                "n_train": int(len(tr)),
+                "n_train": int(len(tr_used)),
                 "n_test": int(len(te)),
+                "n_train_raw": int(len(tr)),
+                "train_balance": {"enabled": bool(tb_enabled), "strategy": str(tb_strategy)},
             }
         )
 
@@ -109,6 +202,7 @@ def evaluate_with_precomputed_folds(
         "recall_std": float(arr_rec.std()),
         "f1_mean": float(arr_f1.mean()),
         "f1_std": float(arr_f1.std()),
+        "train_balance": {"enabled": bool(tb_enabled), "strategy": str(tb_strategy)},
     }
 
     return {
@@ -132,14 +226,18 @@ def evaluate_tfidf_trainonly(
     print_cm: bool,
     label_names: List[str],
     method_name: str = "tfidf",
+    # NEW (optional; backward compatible)
+    train_balance_cfg: Optional[Dict[str, Any]] = None,
+    random_state: int = 42,
 ) -> Dict[str, Any]:
     """
     TF-IDF strictly fit on TRAIN per fold.
-    Moved here to keep paper/evaluate_cv.py clean.
     """
     from paper.cv_features import tfidf_features_fold_fit  # local import keeps dependencies clean
 
     clf_template = build_logreg(logreg_cfg)
+
+    tb_enabled, tb_strategy = _parse_train_balance_cfg(train_balance_cfg)
 
     fold_rows: List[Dict[str, Any]] = []
     cms: List[List[List[int]]] = []
@@ -149,7 +247,17 @@ def evaluate_tfidf_trainonly(
         tr_idx = tr.tolist() if hasattr(tr, "tolist") else list(tr)
         te_idx = te.tolist() if hasattr(te, "tolist") else list(te)
 
-        Xtr_txt = [X_text[i] for i in tr_idx]
+        tr_np = np.asarray(tr_idx, dtype=np.int64)
+        tr_used = _balance_train_indices(
+            tr_np,
+            y,
+            enabled=tb_enabled,
+            strategy=tb_strategy,
+            seed=int(random_state) + 997 * fold_i,
+        )
+        tr_used_list = tr_used.tolist()
+
+        Xtr_txt = [X_text[i] for i in tr_used_list]
         Xte_txt = [X_text[i] for i in te_idx]
 
         Xtr, Xte = tfidf_features_fold_fit(
@@ -159,8 +267,7 @@ def evaluate_tfidf_trainonly(
             transformer_cfg=transformer_cfg,
         )
 
-        # IMPORTANT: index y with the SAME index type (list of ints)
-        ytr = y[tr_idx]
+        ytr = y[tr_used_list]
         yte = y[te_idx]
 
         clf = LogisticRegression(**clf_template.get_params())
@@ -179,8 +286,10 @@ def evaluate_tfidf_trainonly(
                 "precision": prec,
                 "recall": rec,
                 "f1": f1,
-                "n_train": int(len(tr_idx)),
+                "n_train": int(len(tr_used_list)),
                 "n_test": int(len(te_idx)),
+                "n_train_raw": int(len(tr_idx)),
+                "train_balance": {"enabled": bool(tb_enabled), "strategy": str(tb_strategy)},
             }
         )
 
@@ -207,6 +316,7 @@ def evaluate_tfidf_trainonly(
         "recall_std": float(arr_rec.std()),
         "f1_mean": float(arr_f1.mean()),
         "f1_std": float(arr_f1.std()),
+        "train_balance": {"enabled": bool(tb_enabled), "strategy": str(tb_strategy)},
     }
 
     return {
@@ -215,4 +325,5 @@ def evaluate_tfidf_trainonly(
         "summary": summary,
         "confusion_matrices": cms if print_cm else [],
         "tfidf_fit_scope": "train",
+        "train_balance": {"enabled": bool(tb_enabled), "strategy": str(tb_strategy)},
     }
