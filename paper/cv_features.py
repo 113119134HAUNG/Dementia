@@ -2,24 +2,21 @@
 """
 paper/cv_features.py
 
-Feature extraction only:
-- TF-IDF
-- BERT sentence embeddings (mean / CLS / last-N-layers concat + mean)
+Feature extraction only (paper-strict):
+- TF-IDF (char n-grams)
+- BERT sentence embeddings (mean / cls / lastN_concat_mean)
 - GloVe/fastText-style static word embeddings (sentence embedding)
 - Gemma sentence embeddings
 
-NOTE (paper-strict):
-- YAML often loads ngram_range as a list [a, b]
-- Newer scikit-learn requires CountVectorizer.ngram_range to be a tuple (a, b)
-  -> We coerce list->tuple in TF-IDF helpers (single responsibility, no config hacks).
+Paper strict notes:
+- YAML often loads ngram_range as list [a, b]
+- sklearn CountVectorizer.ngram_range expects tuple (a, b)
+  -> we coerce list/str -> tuple here (single responsibility).
 
-Back-compat:
-- evaluate_cv in some repos passes `pooling=` into bert_embeddings_all().
-  -> We accept pooling as an alias of embedding_strategy.
-
-Runtime robustness (NO YAML mutation):
-- If device="cuda" is requested but CUDA is not actually available (CPU-only torch / no GPU),
-  we fallback to CPU for THIS RUN ONLY to avoid crashing.
+Device note:
+- Support device='auto' WITHOUT changing YAML:
+  - auto -> cuda if available else cpu
+  - cuda requested but unavailable -> fallback cpu (warn)
 """
 
 from __future__ import annotations
@@ -61,10 +58,7 @@ def _coerce_ngram_range(v: Any) -> Tuple[int, int]:
 
 
 def _sanitize_vectorizer_cfg(vectorizer_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Make CountVectorizer params sklearn-safe, without mutating caller dict.
-    Currently only fixes ngram_range (list->tuple).
-    """
+    """Make CountVectorizer params sklearn-safe, without mutating caller dict."""
     cfg = dict(vectorizer_cfg or {})
     if "ngram_range" in cfg:
         cfg["ngram_range"] = _coerce_ngram_range(cfg["ngram_range"])
@@ -107,39 +101,44 @@ def tfidf_features_fold_fit(
 
 
 # =========================
-# Torch device helpers
+# Torch device resolver (supports YAML device='auto')
 # =========================
 def _resolve_torch_device(device: str, *, method: str) -> "Any":
     """
-    Return a torch.device. If CUDA requested but unavailable, fallback to CPU.
-    Does NOT modify YAML; runtime-only safety.
+    Supports:
+      - 'auto'  -> cuda if available else cpu
+      - 'cuda' / 'cuda:0' -> if unavailable, fallback cpu (warn)
+      - 'cpu'   -> cpu
+    Returns torch.device
     """
-    import torch  # type: ignore
-
-    dev = (device or "").strip()
-    if not dev:
-        return torch.device("cpu")
-
-    dev_l = dev.lower()
-    if not dev_l.startswith("cuda"):
-        return torch.device(dev_l)
-
-    # CUDA requested -> check availability
-    ok = False
     try:
-        ok = bool(torch.cuda.is_available())
-    except Exception:
-        ok = False
+        import torch  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        raise ImportError(f"{method}: torch is required but not installed.") from e
 
-    if not ok:
-        print(f"[WARN] {method}: device='{dev}' requested but CUDA unavailable -> using CPU for this run (YAML unchanged)")
+    dev = str(device or "").strip().lower()
+    if dev in ("", "auto"):
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if dev.startswith("cuda"):
+        if torch.cuda.is_available():
+            return torch.device(dev)
+        print(f"[WARN] {method}: device='{device}' requested but CUDA unavailable -> fallback to cpu")
         return torch.device("cpu")
 
-    return torch.device(dev)
+    if dev == "cpu":
+        return torch.device("cpu")
+
+    # allow other torch devices if user really sets them (xpu/mps/etc)
+    try:
+        return torch.device(dev)
+    except Exception:
+        print(f"[WARN] {method}: unknown device='{device}', fallback to cpu")
+        return torch.device("cpu")
 
 
 # =========================
-# BERT / Gemma helpers
+# Embedding helpers
 # =========================
 def _masked_mean(last_hidden: "np.ndarray", attention_mask: "np.ndarray") -> "np.ndarray":
     # last_hidden: (B,T,H), mask: (B,T)
@@ -178,20 +177,14 @@ def bert_embeddings_all(
 
     strat = (embedding_strategy or pooling or "mean").strip().lower()
     if strat not in ("mean", "cls", "last4_concat_mean"):
-        raise ValueError("features.bert.embedding_strategy/pooling must be one of: mean | cls | last4_concat_mean")
+        raise ValueError("features.bert.pooling/embedding_strategy must be: mean | cls | last4_concat_mean")
 
     tok = AutoTokenizer.from_pretrained(model_name)
     mdl = AutoModel.from_pretrained(model_name)
     mdl.eval()
 
     dev = _resolve_torch_device(device, method="bert")
-    try:
-        mdl.to(dev)
-    except Exception as e:
-        # extra safety: even if user passed cuda, some torch builds throw on .to('cuda')
-        print(f"[WARN] bert: failed to move model to {dev} -> fallback to CPU for this run (YAML unchanged)")
-        dev = torch.device("cpu")
-        mdl.to(dev)
+    mdl.to(dev)
 
     out_list: List[np.ndarray] = []
     bs = max(1, int(batch_size))
@@ -212,15 +205,15 @@ def bert_embeddings_all(
 
         with torch.no_grad():
             if need_hidden:
-                outputs = mdl(**enc, output_hidden_states=True, return_dict=True)
-                hs = outputs.hidden_states  # tuple: (emb, l1, ..., lL)
+                outputs = mdl(**enc, output_hidden_states=True)
+                hs = outputs.hidden_states
                 if hs is None or len(hs) < (ln + 1):
                     raise ValueError("BERT did not return enough hidden_states for last4_concat_mean.")
                 lastn = torch.cat(hs[-ln:], dim=-1)  # (B,T,H*ln)
                 last_np = lastn.detach().cpu().numpy()
             else:
-                outputs = mdl(**enc, return_dict=True)
-                last = outputs.last_hidden_state  # (B,T,H)
+                outputs = mdl(**enc)
+                last = outputs.last_hidden_state
                 last_np = last.detach().cpu().numpy()
 
             att = enc.get("attention_mask")
@@ -245,10 +238,6 @@ def gemma_embeddings_all(
     batch_size: int,
     pooling: str = "mean",
 ) -> np.ndarray:
-    """
-    Gemma sentence embeddings via masked mean on last_hidden_state.
-    (Paper-aligned: pooling='mean' only)
-    """
     try:
         import torch  # type: ignore
         from transformers import AutoTokenizer, AutoModel  # type: ignore
@@ -261,19 +250,13 @@ def gemma_embeddings_all(
 
     tok = AutoTokenizer.from_pretrained(model_name)
     if tok.pad_token is None:
-        # decoder-only models sometimes lack pad_token; align to eos_token
         tok.pad_token = tok.eos_token
 
     mdl = AutoModel.from_pretrained(model_name)
     mdl.eval()
 
     dev = _resolve_torch_device(device, method="gemma")
-    try:
-        mdl.to(dev)
-    except Exception:
-        print(f"[WARN] gemma: failed to move model to {dev} -> fallback to CPU for this run (YAML unchanged)")
-        dev = torch.device("cpu")
-        mdl.to(dev)
+    mdl.to(dev)
 
     out_list: List[np.ndarray] = []
     bs = max(1, int(batch_size))
@@ -291,8 +274,8 @@ def gemma_embeddings_all(
         enc = {k: v.to(dev) for k, v in enc.items()}
 
         with torch.no_grad():
-            outputs = mdl(**enc, return_dict=True)
-            last = outputs.last_hidden_state  # (B,T,H)
+            outputs = mdl(**enc)
+            last = outputs.last_hidden_state
             last_np = last.detach().cpu().numpy()
             att = enc.get("attention_mask")
             att_np = att.detach().cpu().numpy() if att is not None else None
@@ -304,7 +287,7 @@ def gemma_embeddings_all(
 
 
 # =========================
-# GloVe helpers
+# GloVe / fastText helpers
 # =========================
 def glove_embeddings_all(
     X: Sequence[str],
@@ -318,13 +301,6 @@ def glove_embeddings_all(
     tokenizer: str = "whitespace",          # jieba | char | whitespace
     max_words: Optional[int] = None,        # cap vocab for RAM safety
 ) -> np.ndarray:
-    """
-    Sentence embeddings from static word vectors (GloVe/fastText .vec-like).
-
-    Chinese note:
-      - Use tokenizer="jieba" (recommended) or tokenizer="char".
-      - tokenizer="whitespace" usually yields near-all OOV for Chinese transcripts.
-    """
     p = Path(embeddings_path)
     if not p.exists():
         raise FileNotFoundError(f"Embeddings file not found: {p}")
