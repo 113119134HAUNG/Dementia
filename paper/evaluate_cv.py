@@ -43,59 +43,35 @@ from paper.cv_eval import (
 )
 
 
-def _resolve_runtime_device(device_from_yaml: str, *, method: str) -> str:
+def _maybe_fallback_device(device_from_yaml: str, *, method: str) -> str:
     """
-    Resolve device for THIS RUN ONLY (YAML unchanged).
-
-    Supports:
-      - device='auto' -> 'cuda' if available else 'cpu'
-      - device='cuda' / 'cuda:0' -> if unavailable, fallback 'cpu' with warn
-      - device='cpu' -> 'cpu'
-      - any other string -> pass through (best effort)
+    Respect YAML. Do NOT modify YAML.
+    Only fallback at runtime if YAML requests CUDA but CUDA is not usable.
     """
-    dev_raw = str(device_from_yaml or "").strip()
-    if not dev_raw:
+    dev = str(device_from_yaml).strip()
+    if not dev:
         return "cpu"
 
-    dev = dev_raw.lower()
+    dev_l = dev.lower()
+    if not dev_l.startswith("cuda"):
+        return dev
 
-    # AUTO: choose best available
-    if dev in ("auto",):
-        try:
-            import torch  # type: ignore
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        except Exception:
-            # torch missing -> cannot use cuda anyway
-            return "cpu"
+    try:
+        import torch  # type: ignore
+    except Exception:
+        print(f"[WARN] {method}: YAML device='{dev}' but torch is not installed -> use 'cpu' for this run (YAML unchanged)")
+        return "cpu"
 
-    # Explicit CUDA request
-    if dev.startswith("cuda"):
-        try:
-            import torch  # type: ignore
-        except Exception:
-            print(
-                f"[WARN] {method}: YAML device='{dev_raw}' but torch is not installed -> "
-                "use 'cpu' for this run (YAML unchanged)"
-            )
-            return "cpu"
+    try:
+        cuda_ok = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_ok = False
 
-        try:
-            cuda_ok = bool(torch.cuda.is_available())
-        except Exception:
-            cuda_ok = False
+    if not cuda_ok:
+        print(f"[WARN] {method}: YAML device='{dev}' but CUDA is unavailable -> use 'cpu' for this run (YAML unchanged)")
+        return "cpu"
 
-        if not cuda_ok:
-            print(
-                f"[WARN] {method}: YAML device='{dev_raw}' but CUDA is unavailable -> "
-                "use 'cpu' for this run (YAML unchanged)"
-            )
-            return "cpu"
-
-        # CUDA available, keep exactly what YAML asked (cuda / cuda:0 ...)
-        return dev_raw
-
-    # CPU or other explicit device string
-    return dev_raw
+    return dev
 
 
 def run_evaluate_cv(
@@ -114,25 +90,21 @@ def run_evaluate_cv(
         print("[INFO] features.crossval.enabled=false -> skip evaluate_cv.")
         return ""
 
-    # dataset (already cleaned)
     cleaned_jsonl = Path(str(require(text_cfg, "cleaned_jsonl", where="text")))
     data = load_cleaned_dataset(cleaned_jsonl)
     X_text = data.X
     y = data.y
     label_names = data.label_names
 
-    # CV knobs
     n_splits = int(require(cv_cfg, "n_splits", where="features.crossval"))
     shuffle = bool(cv_cfg.get("shuffle", True))
     random_state = int(require(cv_cfg, "random_state", where="features.crossval"))
     output_indices = Path(str(require(cv_cfg, "output_indices", where="features.crossval")))
 
-    # train balance knobs
     train_balance_cfg = cv_cfg.get("train_balance", {})
     if not isinstance(train_balance_cfg, dict):
         train_balance_cfg = {}
 
-    # metrics knobs
     average = str(cv_cfg.get("metrics_average", "macro"))
     zero_division = int(cv_cfg.get("zero_division", 0))
     metrics_output = Path(str(require(cv_cfg, "metrics_output", where="features.crossval")))
@@ -140,16 +112,13 @@ def run_evaluate_cv(
     print_cm = bool(cv_cfg.get("print_confusion_matrix", True))
     print_method_summary = bool(cv_cfg.get("print_method_summary", True))
 
-    # method selection
     methods_yaml = norm_str_list(cv_cfg.get("methods")) or ["tfidf", "bert", "glove", "gemma", "linq"]
     methods = methods_override if methods_override is not None else methods_yaml
 
-    # feasibility check
     vc = pd.Series(y).value_counts()
     if (vc < n_splits).any():
         raise ValueError(f"Not enough samples per class for {n_splits}-fold CV. Counts:\n{vc}")
 
-    # folds (save once, reuse across methods)
     if reuse_folds:
         folds = load_folds_indices(output_indices)
         print(f"[INFO] Reusing folds from: {output_indices} (n_folds={len(folds)})")
@@ -158,7 +127,6 @@ def run_evaluate_cv(
         save_folds_indices(folds, output_path=output_indices)
         print(f"[INFO] Saved fold indices to: {output_indices} (n_folds={len(folds)})")
 
-    # runtime knobs (batch sizes)
     default_bs = int(cv_cfg.get("batch_size", 8))
     bert_bs = int(cv_cfg.get("bert_batch_size", default_bs))
     gemma_bs = int(cv_cfg.get("gemma_batch_size", default_bs))
@@ -168,7 +136,6 @@ def run_evaluate_cv(
     if tfidf_fit_scope not in ("full", "train"):
         raise ValueError("features.crossval.tfidf_fit_scope must be 'full' or 'train'.")
 
-    # results skeleton
     results: Dict[str, Any] = {
         "data": {
             "cleaned_jsonl": str(cleaned_jsonl),
@@ -239,7 +206,7 @@ def run_evaluate_cv(
             pooling = str(bert_cfg.get("pooling", "mean"))
             max_seq_length = int(require(bert_cfg, "max_seq_length", where="features.bert"))
             device_yaml = str(require(bert_cfg, "device", where="features.bert"))
-            device = _resolve_runtime_device(device_yaml, method="bert")
+            device = _maybe_fallback_device(device_yaml, method="bert")
             logreg_cfg = get_dict(bert_cfg, "logreg", where="features.bert")
 
             X_all = bert_embeddings_all(
@@ -311,7 +278,7 @@ def run_evaluate_cv(
             pooling = str(gemma_cfg.get("pooling", "mean"))
             max_seq_length = int(require(gemma_cfg, "max_seq_length", where="features.gemma"))
             device_yaml = str(require(gemma_cfg, "device", where="features.gemma"))
-            device = _resolve_runtime_device(device_yaml, method="gemma")
+            device = _maybe_fallback_device(device_yaml, method="gemma")
             logreg_cfg = get_dict(gemma_cfg, "logreg", where="features.gemma")
 
             X_all = gemma_embeddings_all(
@@ -343,7 +310,7 @@ def run_evaluate_cv(
             pooling = str(linq_cfg.get("pooling", "mean"))
             max_seq_length = int(require(linq_cfg, "max_seq_length", where="features.linq"))
             device_yaml = str(require(linq_cfg, "device", where="features.linq"))
-            device = _resolve_runtime_device(device_yaml, method="linq")
+            device = _maybe_fallback_device(device_yaml, method="linq")
             logreg_cfg = get_dict(linq_cfg, "logreg", where="features.linq")
 
             X_all = linq_embeddings_all(
@@ -372,8 +339,7 @@ def run_evaluate_cv(
         else:
             raise ValueError(f"Unknown method: {method!r} (allowed: tfidf, bert, glove, gemma, linq)")
 
-        # method summary (safe)
-        if print_method_summary and m in results["methods"]:
+        if print_method_summary:
             sm = results["methods"][m]["summary"]
             print(f"\n[Summary] {m.upper()}  (mean ± std)")
             print(f"  Accuracy : {sm['accuracy_mean']:.4f} ± {sm['accuracy_std']:.4f}")
