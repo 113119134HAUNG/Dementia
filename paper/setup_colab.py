@@ -24,12 +24,6 @@ import urllib.request
 from pathlib import Path
 from typing import List, Optional
 
-# -----------------------------
-# Defaults
-# -----------------------------
-# TODO: 把這個改成你真正的 HF repo id
-# 例如: "Linq-AI-Research/Linq-Embed-Mistral" 或你實際看到的 "org/name"
-LINQ_REPO_ID_DEFAULT = "Linq-AI-Research/Linq-Embed-Mistral"
 
 # -----------------------------
 # Shell helper
@@ -74,6 +68,7 @@ def install_deps(
         "faster-whisper",
         "gdown",
         "pyyaml",
+        "safetensors",
     ]
 
     if install_core:
@@ -274,7 +269,6 @@ def hf_login_and_download(
                 repo_id=repo_id,
                 local_dir=str(local_dir),
                 token=(token or None),
-                local_dir_use_symlinks=False,  # <- 更穩：避免 Colab/Drive symlink 問題
             )
             local_paths.append(local_dir)
             print(f"[OK] {repo_id} -> {local_dir}")
@@ -324,9 +318,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=[
             "bert-base-chinese",
             "google/gemma-2b",
-            LINQ_REPO_ID_DEFAULT,  # <- 這行就是「會下載 Linq-Embed-Mistral」的關鍵
+            "Linq-AI-Research/Linq-Embed-Mistral",
         ],
-        help="HF repo ids to download. Example: --models bert-base-chinese google/gemma-2b org/Linq-Embed-Mistral",
+        help="HF repo ids to download. Example: --models bert-base-chinese google/gemma-2b Linq-AI-Research/Linq-Embed-Mistral",
     )
 
     p.add_argument("--hf-token", type=str, default=None, help="HF token (prefer env HF_TOKEN or Secrets).")
