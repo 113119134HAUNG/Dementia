@@ -7,7 +7,7 @@ Feature extraction only (paper-strict):
 - BERT sentence embeddings (mean / cls / lastN_concat_mean)
 - GloVe/fastText-style static word embeddings (sentence embedding)
 - Gemma sentence embeddings
-- Linq-Embed-Mistral sentence embeddings (mean)
+- Linq-Embed-Mistral sentence embeddings
 
 Paper strict notes:
 - YAML often loads ngram_range as list [a, b]
@@ -141,6 +141,7 @@ def _resolve_torch_device(device: str, *, method: str) -> "Any":
 # Embedding helpers
 # =========================
 def _masked_mean(last_hidden: "np.ndarray", attention_mask: "np.ndarray") -> "np.ndarray":
+    # last_hidden: (B,T,H), mask: (B,T)
     mask = attention_mask.astype(np.float32)
     mask = mask[:, :, None]  # (B,T,1)
     summed = (last_hidden * mask).sum(axis=1)
@@ -160,6 +161,14 @@ def bert_embeddings_all(
     pooling: Optional[str] = None,             # backward-compat alias
     last_n_layers: int = 4,                    # for last4_concat_mean
 ) -> np.ndarray:
+    """
+    BERT sentence embeddings.
+
+    strat:
+      - "mean"              : masked mean over tokens
+      - "cls"               : CLS token embedding
+      - "last4_concat_mean" : concat last-N layers -> masked mean
+    """
     try:
         import torch  # type: ignore
         from transformers import AutoTokenizer, AutoModel  # type: ignore
@@ -287,35 +296,28 @@ def linq_embeddings_all(
     pooling: str = "mean",
 ) -> np.ndarray:
     """
-    Linq-Embed-Mistral sentence embeddings (paper-style):
-    - AutoTokenizer + AutoModel
-    - masked mean pooling over tokens
-    - safe-first load; fallback to trust_remote_code=True
+    Linq-Embed-Mistral sentence embeddings (paper-aligned):
+    - mean pooling with attention_mask
+    - supports device='auto'
     """
     try:
         import torch  # type: ignore
         from transformers import AutoTokenizer, AutoModel  # type: ignore
     except Exception as e:  # noqa: BLE001
-        raise ImportError("linq evaluation requires torch + transformers installed.") from e
+        raise ImportError("Linq evaluation requires torch + transformers installed.") from e
 
     pool = (pooling or "mean").strip().lower()
     if pool != "mean":
         raise ValueError("features.linq.pooling supports only: 'mean' (paper-aligned).")
 
-    try:
-        tok = AutoTokenizer.from_pretrained(model_name)
-    except Exception:
-        tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
+    tok = AutoTokenizer.from_pretrained(model_name)
     if tok.pad_token is None:
+        # Mistral-like tokenizers often have no pad_token
         tok.pad_token = tok.eos_token
 
-    try:
-        mdl = AutoModel.from_pretrained(model_name)
-    except Exception:
-        mdl = AutoModel.from_pretrained(model_name, trust_remote_code=True)
-
+    mdl = AutoModel.from_pretrained(model_name)
     mdl.eval()
+
     dev = _resolve_torch_device(device, method="linq")
     mdl.to(dev)
 
