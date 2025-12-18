@@ -21,9 +21,10 @@ Works in Colab/Jupyter (ignores injected argv like -f).
 Notes:
 - 2D distribution uses TF-IDF -> TruncatedSVD(2) (visualization only).
 - draw_boundary draws LR decision boundary in the 2D SVD space (visualization only).
+  Boundary is only meaningful for BINARY classification. For multi-class, boundary is skipped.
 - boundary_scope controls where boundary is drawn: cleaned only (default) or both cleaned+combined.
 - "Before vectorization" distribution is shown via text length plots (no TF-IDF).
-- Method order fixed to match YAML defaults: tfidf, bert, glove, gemma.
+- Method order fixed to match YAML defaults: tfidf, bert, glove, gemma, linq.
 - ALL titles/axes are English only (paper-ready).
 """
 
@@ -50,13 +51,14 @@ from paper.cv_features import tfidf_features_all
 # -----------------------------
 # naming / formatting helpers
 # -----------------------------
-METHOD_ORDER = ["tfidf", "bert", "glove", "gemma"]
+METHOD_ORDER = ["tfidf", "bert", "glove", "gemma", "linq"]
 
 DISPLAY_NAME = {
     "bert": "BERT-base (mean pooling)",
     "tfidf": "TF-IDF (char 2–4gram)",
     "glove": "fastText/GloVe (300d)",
     "gemma": "Gemma-2B (mean pooling)",
+    "linq": "Linq-Embed-Mistral (mean pooling)",
 }
 
 METRIC_INFO = {
@@ -249,8 +251,11 @@ def plot_distribution_2d_tfidf(
     plt.figure(figsize=(9.2, 6.2))
     ax = plt.gca()
 
-    if draw_boundary:
-        # NOTE: boundary is in 2D visualization space only
+    uniq_y = sorted(np.unique(y).tolist())
+    n_classes = len(uniq_y)
+
+    # boundary only for binary classification
+    if draw_boundary and n_classes == 2:
         clf = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=random_state)
         clf.fit(X2, y)
 
@@ -258,10 +263,13 @@ def plot_distribution_2d_tfidf(
         y_min, y_max = X2[:, 1].min() - 0.5, X2[:, 1].max() + 0.5
         xx, yy = np.meshgrid(np.linspace(x_min, x_max, 280), np.linspace(y_min, y_max, 280))
         grid = np.c_[xx.ravel(), yy.ravel()]
-        prob = clf.predict_proba(grid)[:, 1].reshape(xx.shape)
 
-        plt.contourf(xx, yy, prob, alpha=0.14)
-        plt.contour(xx, yy, prob, levels=[0.5], linestyles="--", linewidths=1.2)
+        # decision_function is safest for binary; contour at 0
+        z = clf.decision_function(grid).reshape(xx.shape)
+
+        plt.contourf(xx, yy, z, alpha=0.14)
+        plt.contour(xx, yy, z, levels=[0.0], linestyles="--", linewidths=1.2)
+
         ax.text(
             0.01,
             0.01,
@@ -270,11 +278,22 @@ def plot_distribution_2d_tfidf(
             fontsize=9,
             verticalalignment="bottom",
         )
+    elif draw_boundary and n_classes != 2:
+        ax.text(
+            0.01,
+            0.01,
+            f"Decision boundary skipped (multi-class: {n_classes} classes)",
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment="bottom",
+        )
 
-    # scatter by class (use default cycle colors; avoid manual forcing)
-    for k in sorted(np.unique(y)):
+    # scatter by class
+    shown_names = []
+    for k in uniq_y:
         mask = (y == k)
         name = label_names[int(k)] if int(k) < len(label_names) else f"class_{k}"
+        shown_names.append(name)
         plt.scatter(X2[mask, 0], X2[mask, 1], label=name, s=26, alpha=0.82)
 
     plt.title(title2)
@@ -282,8 +301,19 @@ def plot_distribution_2d_tfidf(
     plt.ylabel(ylab)
     ax.grid(True, linestyle="--", alpha=0.25)
     plt.legend(title="Class", frameon=True)
-    plt.tight_layout()
 
+    # small note: which labels are present
+    ax.text(
+        0.99,
+        0.01,
+        "Classes shown: " + ", ".join(shown_names),
+        transform=ax.transAxes,
+        fontsize=9,
+        ha="right",
+        va="bottom",
+    )
+
+    plt.tight_layout()
     ensure_parent(out_png)
     plt.savefig(out_png, dpi=240)
     plt.close()
@@ -321,7 +351,11 @@ def build_results_table(
     df.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
     ensure_parent(out_tex)
-    out_tex.write_text(df.to_latex(index=False, escape=False), encoding="utf-8")
+    # Paper-friendly LaTeX table (no index)
+    out_tex.write_text(
+        df.to_latex(index=False, escape=False),
+        encoding="utf-8",
+    )
 
     return df
 
@@ -654,7 +688,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--draw-boundary",
         action="store_true",
-        help="Draw logistic regression decision boundary in 2D SVD space (visualization only).",
+        help="Draw logistic regression decision boundary in 2D SVD space (visualization only). "
+             "Boundary is only drawn for binary classification.",
     )
     p.add_argument(
         "--boundary-scope",
