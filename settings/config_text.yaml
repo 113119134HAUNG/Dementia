@@ -236,11 +236,10 @@ features:
 
   # =========================
   # NEW: Linq-Embed-Mistral
+  # (HF repo: Linq-AI-Research/Linq-Embed-Mistral)
+  # local_dir will be: /content/models/Linq-AI-Research__Linq-Embed-Mistral
   # =========================
   linq:
-    # NOTE:
-    # setup_colab.py 下載時會用 repo_id.replace("/", "__") 當資料夾名
-    # 例如 repo_id="Linq-AI-Research/Linq-Embed-Mistral" -> "Linq-AI-Research__Linq-Embed-Mistral"
     model_name: "/content/models/Linq-AI-Research__Linq-Embed-Mistral"
     pooling: "mean"
     max_seq_length: *max_seq_length
@@ -255,10 +254,9 @@ features:
   crossval:
     enabled: true
 
-    # 每個 fold 的 TRAIN 做平衡
     train_balance:
       enabled: true
-      strategy: "downsample"   # "downsample" | "upsample" | "none"
+      strategy: "downsample"
       random_state: *seed
 
     n_splits: 5
@@ -267,7 +265,7 @@ features:
     output_indices: "/content/chinese_combined/folds_indices.json"
 
     methods: ["tfidf", "bert", "glove", "gemma", "linq"]
-    tfidf_fit_scope: "train"   # "full" | "train"
+    tfidf_fit_scope: "train"
 
     batch_size: 8
     bert_batch_size: 8
