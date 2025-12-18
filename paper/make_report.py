@@ -21,7 +21,6 @@ Works in Colab/Jupyter (ignores injected argv like -f).
 Notes:
 - 2D distribution uses TF-IDF -> TruncatedSVD(2) (visualization only).
 - draw_boundary draws LR decision boundary in the 2D SVD space (visualization only).
-  Boundary is only meaningful for BINARY classification. For multi-class, boundary is skipped.
 - boundary_scope controls where boundary is drawn: cleaned only (default) or both cleaned+combined.
 - "Before vectorization" distribution is shown via text length plots (no TF-IDF).
 - Method order fixed to match YAML defaults: tfidf, bert, glove, gemma, linq.
@@ -152,12 +151,9 @@ def _load_text_label_from_jsonl(
 # color utilities
 # -----------------------------
 def _gradient_colors(n: int, cmap_name: str = "viridis", alpha: float = 0.55) -> List[Tuple[float, float, float, float]]:
-    """
-    Return n RGBA colors from a matplotlib colormap (gradient).
-    """
     n = max(1, int(n))
     cmap = plt.get_cmap(cmap_name)
-    xs = np.linspace(0.25, 0.90, n)  # avoid too-light end
+    xs = np.linspace(0.25, 0.90, n)
     cols = [list(cmap(x)) for x in xs]
     for c in cols:
         c[3] = alpha
@@ -175,9 +171,6 @@ def plot_length_distribution(
     out_png: Path,
     title: str,
 ) -> None:
-    """
-    "Before vectorization" distribution: text length (characters).
-    """
     lens = np.array([len((s or "")) for s in X_text], dtype=float)
 
     groups: List[np.ndarray] = []
@@ -251,11 +244,7 @@ def plot_distribution_2d_tfidf(
     plt.figure(figsize=(9.2, 6.2))
     ax = plt.gca()
 
-    uniq_y = sorted(np.unique(y).tolist())
-    n_classes = len(uniq_y)
-
-    # boundary only for binary classification
-    if draw_boundary and n_classes == 2:
+    if draw_boundary:
         clf = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=random_state)
         clf.fit(X2, y)
 
@@ -263,13 +252,10 @@ def plot_distribution_2d_tfidf(
         y_min, y_max = X2[:, 1].min() - 0.5, X2[:, 1].max() + 0.5
         xx, yy = np.meshgrid(np.linspace(x_min, x_max, 280), np.linspace(y_min, y_max, 280))
         grid = np.c_[xx.ravel(), yy.ravel()]
+        prob = clf.predict_proba(grid)[:, 1].reshape(xx.shape)
 
-        # decision_function is safest for binary; contour at 0
-        z = clf.decision_function(grid).reshape(xx.shape)
-
-        plt.contourf(xx, yy, z, alpha=0.14)
-        plt.contour(xx, yy, z, levels=[0.0], linestyles="--", linewidths=1.2)
-
+        plt.contourf(xx, yy, prob, alpha=0.14)
+        plt.contour(xx, yy, prob, levels=[0.5], linestyles="--", linewidths=1.2)
         ax.text(
             0.01,
             0.01,
@@ -278,22 +264,10 @@ def plot_distribution_2d_tfidf(
             fontsize=9,
             verticalalignment="bottom",
         )
-    elif draw_boundary and n_classes != 2:
-        ax.text(
-            0.01,
-            0.01,
-            f"Decision boundary skipped (multi-class: {n_classes} classes)",
-            transform=ax.transAxes,
-            fontsize=9,
-            verticalalignment="bottom",
-        )
 
-    # scatter by class
-    shown_names = []
-    for k in uniq_y:
+    for k in sorted(np.unique(y)):
         mask = (y == k)
         name = label_names[int(k)] if int(k) < len(label_names) else f"class_{k}"
-        shown_names.append(name)
         plt.scatter(X2[mask, 0], X2[mask, 1], label=name, s=26, alpha=0.82)
 
     plt.title(title2)
@@ -301,19 +275,8 @@ def plot_distribution_2d_tfidf(
     plt.ylabel(ylab)
     ax.grid(True, linestyle="--", alpha=0.25)
     plt.legend(title="Class", frameon=True)
-
-    # small note: which labels are present
-    ax.text(
-        0.99,
-        0.01,
-        "Classes shown: " + ", ".join(shown_names),
-        transform=ax.transAxes,
-        fontsize=9,
-        ha="right",
-        va="bottom",
-    )
-
     plt.tight_layout()
+
     ensure_parent(out_png)
     plt.savefig(out_png, dpi=240)
     plt.close()
@@ -351,11 +314,7 @@ def build_results_table(
     df.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
     ensure_parent(out_tex)
-    # Paper-friendly LaTeX table (no index)
-    out_tex.write_text(
-        df.to_latex(index=False, escape=False),
-        encoding="utf-8",
-    )
+    out_tex.write_text(df.to_latex(index=False, escape=False), encoding="utf-8")
 
     return df
 
@@ -538,11 +497,6 @@ def run_make_report(
     boundary_scope: str,
     skip_combined: bool,
 ) -> None:
-    """
-    boundary_scope:
-      - "cleaned": draw boundary only on post-clean plots
-      - "both"   : draw boundary on both post-clean and pre-clean plots
-    """
     boundary_scope = (boundary_scope or "cleaned").strip().lower()
     if boundary_scope not in ("cleaned", "both"):
         raise ValueError("boundary_scope must be one of: cleaned | both")
@@ -556,7 +510,6 @@ def run_make_report(
 
     cleaned_jsonl = Path(str(require(text_cfg, "cleaned_jsonl", where="text")))
 
-    # combined (pre-clean) JSONL path from YAML if present
     output_dir = Path(str(require(text_cfg, "output_dir", where="text")))
     combined_name = str(require(text_cfg, "combined_name", where="text"))
     combined_jsonl = output_dir / combined_name
@@ -569,13 +522,11 @@ def run_make_report(
 
     tfidf_cfg = get_dict(feat_cfg, "tfidf", where="features")
 
-    # ===== A) Post-clean dataset (main paper dataset) =====
     data = load_cleaned_dataset(cleaned_jsonl)
     X_text = data.X
     y = data.y
     label_names = data.label_names
 
-    # A0) length distribution (before vectorization) — post-clean
     plot_length_distribution(
         X_text=X_text,
         y=y,
@@ -584,7 +535,6 @@ def run_make_report(
         title="Text length distribution (post-clean dataset)",
     )
 
-    # A1) TF-IDF -> SVD (2D) distribution — post-clean
     draw_cleaned = bool(draw_boundary)
     plot_distribution_2d_tfidf(
         X_text=X_text,
@@ -597,7 +547,6 @@ def run_make_report(
         random_state=seed,
     )
 
-    # ===== B) Pre-clean combined dataset, optional =====
     if (not skip_combined) and combined_jsonl.exists():
         try:
             Xc, yc, label_names_c = _load_text_label_from_jsonl(combined_jsonl)
@@ -624,13 +573,12 @@ def run_make_report(
         except Exception as e:
             print(f"[WARN] Skip pre-clean combined plots due to error: {type(e).__name__}: {e}")
 
-    # ===== C) metrics-based artifacts =====
     if not metrics_output.exists():
         print(f"[WARN] metrics_output not found: {metrics_output}")
         print("[WARN] Please run:  python -m paper.evaluate_cv --config <...>")
         return
 
-    cv_metrics = _safe_load_json(metrics_output)
+    cv_metrics = json.loads(metrics_output.read_text(encoding="utf-8"))
 
     build_results_table(
         cv_metrics=cv_metrics,
@@ -638,7 +586,6 @@ def run_make_report(
         out_tex=out_dir / "results_table.tex",
     )
 
-    # boxplots (with gradient colors)
     plot_metric_boxplot(
         cv_metrics=cv_metrics,
         metric_key="accuracy",
@@ -668,7 +615,6 @@ def run_make_report(
         cmap_name="viridis",
     )
 
-    # fold-line plots (stability)
     for mk in ["accuracy", "precision", "recall", "f1"]:
         plot_metric_fold_lines(
             cv_metrics=cv_metrics,
@@ -685,30 +631,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
     p.add_argument("--outdir", type=str, default="/content/chinese_combined/report", help="Output directory")
 
-    p.add_argument(
-        "--draw-boundary",
-        action="store_true",
-        help="Draw logistic regression decision boundary in 2D SVD space (visualization only). "
-             "Boundary is only drawn for binary classification.",
-    )
-    p.add_argument(
-        "--boundary-scope",
-        type=str,
-        default="cleaned",
-        choices=["cleaned", "both"],
-        help="Where to draw boundary: cleaned only (default) or both cleaned+pre-clean.",
-    )
-
-    p.add_argument(
-        "--skip-combined",
-        action="store_true",
-        help="Skip plots for the pre-clean combined JSONL even if it exists.",
-    )
+    p.add_argument("--draw-boundary", action="store_true")
+    p.add_argument("--boundary-scope", type=str, default="cleaned", choices=["cleaned", "both"])
+    p.add_argument("--skip-combined", action="store_true")
     return p
 
 
 def cli_main() -> None:
-    args, _unknown = build_arg_parser().parse_known_args()  # ignore Colab injected args like -f
+    args, _unknown = build_arg_parser().parse_known_args()
     run_make_report(
         config_path=args.config,
         outdir=args.outdir,
