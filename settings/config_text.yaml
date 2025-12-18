@@ -238,7 +238,10 @@ features:
   # NEW: Linq-Embed-Mistral
   # =========================
   linq:
-    model_name: "/content/models/Linq-Embed-Mistral"
+    # NOTE:
+    # setup_colab.py 下載時會用 repo_id.replace("/", "__") 當資料夾名
+    # 例如 repo_id="Linq-AI-Research/Linq-Embed-Mistral" -> "Linq-AI-Research__Linq-Embed-Mistral"
+    model_name: "/content/models/Linq-AI-Research__Linq-Embed-Mistral"
     pooling: "mean"
     max_seq_length: *max_seq_length
     device: "auto"
