@@ -234,6 +234,21 @@ features:
       max_iter: *logreg_max_iter
       random_state: *seed
 
+  # =========================
+  # NEW: Linq-Embed-Mistral
+  # =========================
+  linq:
+    model_name: "/content/models/Linq-Embed-Mistral"
+    pooling: "mean"
+    max_seq_length: *max_seq_length
+    device: "auto"
+    logreg:
+      C: *logreg_C
+      class_weight: "balanced"
+      solver: "lbfgs"
+      max_iter: *logreg_max_iter
+      random_state: *seed
+
   crossval:
     enabled: true
 
@@ -248,12 +263,13 @@ features:
     random_state: *seed
     output_indices: "/content/chinese_combined/folds_indices.json"
 
-    methods: ["tfidf", "bert", "glove", "gemma"]
+    methods: ["tfidf", "bert", "glove", "gemma", "linq"]
     tfidf_fit_scope: "train"   # "full" | "train"
 
     batch_size: 8
     bert_batch_size: 8
     gemma_batch_size: 4
+    linq_batch_size: 4
 
     metrics_average: "macro"
     zero_division: 0
