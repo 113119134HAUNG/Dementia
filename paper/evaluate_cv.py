@@ -6,7 +6,7 @@ This file only:
 - reads YAML
 - loads cleaned JSONL
 - builds/reuses fold indices
-- runs methods (tfidf/bert/glove/gemma) using same folds
+- runs methods (tfidf/bert/glove/gemma/linq) using same folds
 - saves metrics JSON
 
 IMPORTANT:
@@ -35,6 +35,7 @@ from paper.cv_features import (
     bert_embeddings_all,
     glove_embeddings_all,
     gemma_embeddings_all,
+    linq_embeddings_all,
 )
 from paper.cv_eval import (
     evaluate_with_precomputed_folds,
@@ -62,7 +63,6 @@ def _maybe_fallback_device(device_from_yaml: str, *, method: str) -> str:
         print(f"[WARN] {method}: YAML device='{dev}' but torch is not installed -> use 'cpu' for this run (YAML unchanged)")
         return "cpu"
 
-    # torch exists but CUDA may be unavailable (CPU-only build or no GPU)
     try:
         cuda_ok = bool(torch.cuda.is_available())
     except Exception:
@@ -72,7 +72,7 @@ def _maybe_fallback_device(device_from_yaml: str, *, method: str) -> str:
         print(f"[WARN] {method}: YAML device='{dev}' but CUDA is unavailable -> use 'cpu' for this run (YAML unchanged)")
         return "cpu"
 
-    return dev  # CUDA is usable, respect YAML exactly
+    return dev
 
 
 def run_evaluate_cv(
@@ -91,25 +91,21 @@ def run_evaluate_cv(
         print("[INFO] features.crossval.enabled=false -> skip evaluate_cv.")
         return ""
 
-    # dataset (already cleaned)
     cleaned_jsonl = Path(str(require(text_cfg, "cleaned_jsonl", where="text")))
     data = load_cleaned_dataset(cleaned_jsonl)
     X_text = data.X
     y = data.y
     label_names = data.label_names
 
-    # CV knobs
     n_splits = int(require(cv_cfg, "n_splits", where="features.crossval"))
     shuffle = bool(cv_cfg.get("shuffle", True))
     random_state = int(require(cv_cfg, "random_state", where="features.crossval"))
     output_indices = Path(str(require(cv_cfg, "output_indices", where="features.crossval")))
 
-    # train balance knobs
     train_balance_cfg = cv_cfg.get("train_balance", {})
     if not isinstance(train_balance_cfg, dict):
         train_balance_cfg = {}
 
-    # metrics knobs
     average = str(cv_cfg.get("metrics_average", "macro"))
     zero_division = int(cv_cfg.get("zero_division", 0))
     metrics_output = Path(str(require(cv_cfg, "metrics_output", where="features.crossval")))
@@ -117,16 +113,13 @@ def run_evaluate_cv(
     print_cm = bool(cv_cfg.get("print_confusion_matrix", True))
     print_method_summary = bool(cv_cfg.get("print_method_summary", True))
 
-    # method selection
-    methods_yaml = norm_str_list(cv_cfg.get("methods")) or ["tfidf", "bert", "glove", "gemma"]
+    methods_yaml = norm_str_list(cv_cfg.get("methods")) or ["tfidf", "bert", "glove", "gemma", "linq"]
     methods = methods_override if methods_override is not None else methods_yaml
 
-    # feasibility check
     vc = pd.Series(y).value_counts()
     if (vc < n_splits).any():
         raise ValueError(f"Not enough samples per class for {n_splits}-fold CV. Counts:\n{vc}")
 
-    # folds (save once, reuse across methods)
     if reuse_folds:
         folds = load_folds_indices(output_indices)
         print(f"[INFO] Reusing folds from: {output_indices} (n_folds={len(folds)})")
@@ -135,16 +128,15 @@ def run_evaluate_cv(
         save_folds_indices(folds, output_path=output_indices)
         print(f"[INFO] Saved fold indices to: {output_indices} (n_folds={len(folds)})")
 
-    # runtime knobs
     default_bs = int(cv_cfg.get("batch_size", 8))
     bert_bs = int(cv_cfg.get("bert_batch_size", default_bs))
     gemma_bs = int(cv_cfg.get("gemma_batch_size", default_bs))
+    linq_bs = int(cv_cfg.get("linq_batch_size", default_bs))
 
     tfidf_fit_scope = str(cv_cfg.get("tfidf_fit_scope", "full")).strip().lower()
     if tfidf_fit_scope not in ("full", "train"):
         raise ValueError("features.crossval.tfidf_fit_scope must be 'full' or 'train'.")
 
-    # results skeleton
     results: Dict[str, Any] = {
         "data": {
             "cleaned_jsonl": str(cleaned_jsonl),
@@ -313,8 +305,40 @@ def run_evaluate_cv(
                 train_balance_cfg=train_balance_cfg,
             )
 
+        elif m == "linq":
+            linq_cfg = get_dict(feat_cfg, "linq", where="features")
+            model_name = str(require(linq_cfg, "model_name", where="features.linq"))
+            pooling = str(linq_cfg.get("pooling", "mean"))
+            max_seq_length = int(require(linq_cfg, "max_seq_length", where="features.linq"))
+            device_yaml = str(require(linq_cfg, "device", where="features.linq"))
+            device = _maybe_fallback_device(device_yaml, method="linq")
+            logreg_cfg = get_dict(linq_cfg, "logreg", where="features.linq")
+
+            X_all = linq_embeddings_all(
+                X_text,
+                model_name=model_name,
+                max_seq_length=max_seq_length,
+                device=device,
+                batch_size=linq_bs,
+                pooling=pooling,
+            )
+
+            results["methods"]["linq"] = evaluate_with_precomputed_folds(
+                X_all,
+                y,
+                folds,
+                logreg_cfg=logreg_cfg,
+                average=average,
+                zero_division=zero_division,
+                print_report=print_report,
+                print_cm=print_cm,
+                label_names=label_names,
+                method_name="linq",
+                train_balance_cfg=train_balance_cfg,
+            )
+
         else:
-            raise ValueError(f"Unknown method: {method!r} (allowed: tfidf, bert, glove, gemma)")
+            raise ValueError(f"Unknown method: {method!r} (allowed: tfidf, bert, glove, gemma, linq)")
 
         if print_method_summary:
             sm = results["methods"][m]["summary"]
@@ -333,7 +357,7 @@ def run_evaluate_cv(
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Paper-style K-fold CV evaluator (YAML-driven).")
     p.add_argument("--config", type=str, default=None, help="Path to config_text.yaml")
-    p.add_argument("--methods", nargs="+", default=None, help="Override methods: tfidf bert glove gemma")
+    p.add_argument("--methods", nargs="+", default=None, help="Override methods: tfidf bert glove gemma linq")
     p.add_argument("--reuse-folds", action="store_true", help="Reuse existing folds indices JSON.")
     return p
 
