@@ -25,6 +25,13 @@ from pathlib import Path
 from typing import List, Optional
 
 # -----------------------------
+# Defaults
+# -----------------------------
+# TODO: 把這個改成你真正的 HF repo id
+# 例如: "Linq-AI-Research/Linq-Embed-Mistral" 或你實際看到的 "org/name"
+LINQ_REPO_ID_DEFAULT = "Linq-AI-Research/Linq-Embed-Mistral"
+
+# -----------------------------
 # Shell helper
 # -----------------------------
 def run(cmd: List[str], *, quiet: bool = False) -> None:
@@ -32,11 +39,14 @@ def run(cmd: List[str], *, quiet: bool = False) -> None:
         print("\n$ " + " ".join(cmd))
     subprocess.run(cmd, check=True)
 
+
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
+
 def in_colab() -> bool:
     return "COLAB_GPU" in os.environ or "COLAB_RELEASE_TAG" in os.environ
+
 
 # -----------------------------
 # Install deps (Colab-safe)
@@ -86,6 +96,7 @@ def install_deps(
 
     run(cmd, quiet=quiet)
 
+
 # -----------------------------
 # Google Drive download (gdown)
 # -----------------------------
@@ -107,6 +118,7 @@ def gdrive_download(*, file_id: str, output_path: Path) -> Path:
         raise RuntimeError("gdown download failed (returned None).")
     return output_path
 
+
 # -----------------------------
 # Unzip
 # -----------------------------
@@ -126,6 +138,7 @@ def unzip_file(zip_path: Path, *, out_dir: Path) -> None:
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(path=str(out_dir))
 
+
 # -----------------------------
 # Git clone
 # -----------------------------
@@ -136,6 +149,7 @@ def git_clone(*, repo_url: str, repo_dir: Path) -> None:
     ensure_dir(repo_dir.parent)
     print(f"[INFO] Cloning: {repo_url} -> {repo_dir}")
     run(["git", "clone", repo_url, str(repo_dir)], quiet=False)
+
 
 # -----------------------------
 # Download + gunzip fastText vectors
@@ -166,6 +180,7 @@ def download_fasttext_vec(*, url: str, out_vec_path: Path) -> Path:
         f"(size={out_vec_path.stat().st_size/1024/1024:.1f} MB)"
     )
     return out_vec_path
+
 
 # -----------------------------
 # HF login + model download (robust)
@@ -259,6 +274,7 @@ def hf_login_and_download(
                 repo_id=repo_id,
                 local_dir=str(local_dir),
                 token=(token or None),
+                local_dir_use_symlinks=False,  # <- 更穩：避免 Colab/Drive symlink 問題
             )
             local_paths.append(local_dir)
             print(f"[OK] {repo_id} -> {local_dir}")
@@ -267,6 +283,7 @@ def hf_login_and_download(
             print(f"       Error: {repr(e)}")
 
     return local_paths
+
 
 # -----------------------------
 # CLI
@@ -304,13 +321,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--models",
         nargs="+",
-        default=["bert-base-chinese", "google/gemma-2b"],
-        help="HF repo ids to download. Example: --models bert-base-chinese google/gemma-2b",
+        default=[
+            "bert-base-chinese",
+            "google/gemma-2b",
+            LINQ_REPO_ID_DEFAULT,  # <- 這行就是「會下載 Linq-Embed-Mistral」的關鍵
+        ],
+        help="HF repo ids to download. Example: --models bert-base-chinese google/gemma-2b org/Linq-Embed-Mistral",
     )
 
     p.add_argument("--hf-token", type=str, default=None, help="HF token (prefer env HF_TOKEN or Secrets).")
     p.add_argument("--no-interactive", action="store_true", help="Do not prompt for HF token; use env/arg only.")
     return p
+
 
 def cli_main() -> None:
     args = build_arg_parser().parse_args()
@@ -361,6 +383,7 @@ def cli_main() -> None:
     print("vec_path   :", args.vec_path)
     print("models_dir :", args.models_dir)
     print("models     :", args.models)
+
 
 if __name__ == "__main__":
     cli_main()
